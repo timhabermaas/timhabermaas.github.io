@@ -1,5 +1,11 @@
 @import url("poole.css");
 
+@media (min-width: 38rem) {
+  html {
+    font-size: 18px;
+  }
+}
+
 .masthead-title h3 {
   display:inline-block;
 }

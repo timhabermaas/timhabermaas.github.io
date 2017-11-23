@@ -2,10 +2,6 @@
 title: Contact
 ---
 
-I live in a small hut in the mountains of Kumano Kodō on Kii Hantō and would not
-like to be contacted.
-
-```haskell
-foo :: IO ()
-foo = putStrLn "bar"
-```
+If you'd like to contact me, you can write me an email: <a href="&#109;&#97;&#105;&#108;&#116;&#111;&#58;
+&#116;&#105;&#109;&#46;&#104;&#97;&#98;&#101;&#114;&#109;&#97;&#97;&#115;&#64;&#103;&#109;&#97;&#105;&#108;&#46;&#99;&#111;&#109;">
+&#116;&#105;&#109;&#46;&#104;&#97;&#98;&#101;&#114;&#109;&#97;&#97;&#115;&#64;&#103;&#109;&#97;&#105;&#108;&#46;&#99;&#111;&#109;</a>.
