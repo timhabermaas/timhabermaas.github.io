@@ -1,0 +1,545 @@
+---
+title: "A Composable (params/JSON) Decoder Library for Ruby"
+---
+
+[Show me the code!](#the-result)
+
+The values returned from Ruby's `JSON.parse`, Ruby's `CSV.parse`, Rails'
+`params` and savon's SOAP responses all have one thing in common: They are a
+subset ^[TODO: subset necessary to describe what I mean?] of some combination of
+the following types:
+
+* `Integer`
+* `Float`
+* `String`
+* `TrueClass`/`FalseClass`
+* `Hash`
+* `Array`
+
+This might not seem like such a big deal, but being able to handle all return
+values identically let's write one generic decoder library.
+
+## What is a decoder?
+
+_Decoder_ has a bunch of meanings. I have the following hand-wavy definition in mind:
+
+^[TODO: object graph sounds weird, skip a formal definition? "For the purpose of this post"]
+> A decoder is a partial function which converts one object graph into another.
+
+_partial_ simply means that a decode might not succeed (think trying to
+interpret `"a"` as an integer).
+
+Sometimes such functionality is also called _coercing_, but coercing is
+already an [overloaded term in Ruby](https://apidock.com/ruby/Numeric/coerce)
+and used when [talking about strong/weak type
+systems](https://en.wikipedia.org/wiki/Type_conversion). So, I'll stick to
+calling it _decoding_.
+
+## Why do I need one?
+
+You don't[^type-system], but for larger applications it's very useful to convert values
+received at the boundaries of your system (HTTP, file system, database, ...)
+to values the rest of your program can work with. Sprinkling a bunch of
+`Date.parse` throughout your app gets tiresome fast. A bunch of examples:
+
+* converting String values (`"2018-10-02"`, `"true"`, `"42"`) to the proper types (`Date`, `TrueClass`, `Integer`)
+* interpreting `nil`s correctly (sometimes they mean the absence of values, sometimes they mean infinity)
+* dealing with badly designed APIs (`"2999-12-31"` might mean "no deadline" [^deadline])
+^[TODO: tagged unions might be another example (`{type: "..."}`)]
+
+## Existing solutions and their shortcomings(?)
+
+^[TODO: what sets this library apart is that a decoder is a value which can be passed around and extended freely.]
+
+Some of these use cases are already handled by `ActiveRecord`, but it can
+only be leveraged for the most basic CRUD applications. Therefore several
+gems were created to deal with this problem.
+
+* [dry-types](https://github.com/dry-rb/dry-types)/[dry-validation](https://github.com/dry-rb/dry-validation)
+* [safe_type](https://github.com/chanzuckerberg/safe_type)
+* [coercible](https://github.com/solnic/coercible)
+
+TODO: They take a DSL heavy approach.
+
+## Running example
+
+Let's assume we're tasked to decode the following hash maps to their
+respective Ruby representations (see end of code listing). We'll use this
+concrete example as a guide throughout this post.
+
+
+```ruby
+# p1 and p2 are two possible shapes for the same form params
+p1 = {
+  "type" => "circle",
+  "center" => {
+    "x" => "10",
+    "y" => "12"
+  },
+  "radius" => "4",
+  "color" => "red",
+  "status" => "visible"
+}
+
+p2 = {
+  "type" => "rectangle",
+  "topLeft" => {
+    "x" => "0",
+    "y" => "3"
+  },
+  "width" => "4",
+  "height" => "5",
+  "color" => "blue",
+  "status" => "invisible"
+}
+
+def decoder
+  # TODO
+end
+
+decoder.run(p1) # => Circle.new(Point.new(10, 12), 4, "RED", true)
+decoder.run(p2) # => Rectangle.new(Point.new(0, 3), Point.new(4, 8), "BLUE", false)
+```
+
+The conversion from the hash(es) `p1` and `p2` to the Ruby object is not
+straightforward at all. A couple of points to note:
+
+* Depending on the value of `"type"` the decoder returns either a `Circle` or a
+  `Rectangle`.
+* The representation of the rectangle in `p2` differs from the one we use in
+  our Ruby class `Rectangle` (point + width + height vs point + point).
+* The `"color"` field is transmitted using lowercase, but we want to convert it
+  to uppercase.
+* `"status"` is either `"visible"` or `"invisible"`---on the Ruby side we want
+  to set a visibility flag to either `true` or `false`.
+
+## Building it
+
+^[TODO: talk about inspiration]
+
+Let's start with the most simple decoder: The identity decoder^[TODO: add
+wikilink] which just returns its input.
+
+Since a decoder is a partial function we can use a `lambda` to represent it
+and take care of the partiality by using a result/either type [^either]. We
+could use an option type as well, but the additional error messages will be
+invaluable when figuring out why a decoder didn't return the expected
+results.
+
+```ruby
+id_decoder = -> (input) { Ok(input) }
+id_decoder["23"] # => "Ok(23)"
+```
+
+Composing different decoders will require us to define methods on a decoder,
+so let's wrap that lambda in a class so we don't need to monkey patch `Proc`.
+
+```ruby
+class Decoder
+  def initialize(&block)
+    @f = block
+  end
+
+  def run(value)
+    @f[value]
+  end
+
+  def self.id
+    new do |input|
+      Ok(input)
+    end
+  end
+end
+
+Decoder.id.run("23") # => "Ok(23)"
+```
+
+Alright, now we're all set to tackle the first real problem: Getting from a
+string to an integer.
+
+### String to integer (`"42" -> 42`)
+
+We'll use `Integer` for strict conversion from strings to integers. `to_i`
+just returns `0` when giving invalid input. That's usually not what we want.
+
+```ruby
+integer = Decoder.new do |input|
+  begin
+    Ok(Integer(input))
+  rescue TypeError, ArgumentError
+    Err("'#{input.inspect}' is not an integer")
+  end
+end
+
+integer.run("123") # => Ok(123)
+```
+
+The code should be pretty straighforward: On every input which is not
+convertable to a number we return an error (`Integer(nil)` returns a
+`TypeError`).
+
+### Converting a string to uppercase (`"red"` -> `"RED"`)
+
+Remember that the color name of a shape is passed in as lowercase, but our
+backend needs it to be uppercase? At this point we could define another
+custom decoder which takes a string and returns its uppercase variant. But
+what happens if we have to decode in the opposite direction---from uppercase
+to lowercase? Or change a number from 0-indexed to 1-indexed---by adding 1 to
+the decoded value? Writing custom decoders for each of these seems like a lot
+of unnecessary work.
+
+All these use cases have one thing in common: We want to call a function on
+the decoded value. So, let's add a way to do so to `Decoder`:
+
+```ruby
+class Decoder
+  def fmap(&block)
+    Decoder.new do |input|
+      run(input).fmap(&block)
+    end
+  end
+end
+```
+
+`Decoder#fmap` is very similar to `Array#map` in that it "maps" a function
+over the element(s). However, I chose to not call it `map` [^fmap] to make it less
+confusing when reading code which deals with decoders and arrays at the same
+time.
+
+We can now express our color decoder using `fmap`:
+
+```ruby
+color = Decoder.id.fmap { |output| output.upcase }
+# or shorter
+color = Decoder.id.fmap(&:upcase)
+
+color.run("red") # => Ok("RED")
+```
+
+We're almost finished converting the values of `p1` or `p2`, the only thing left is the `"status"` key and its possible values.
+
+### Alternatives (`"visible"` -> `true` OR `"invisible"` -> `false`)
+
+`"status"` can have two distinct values: `"visible"` and `"invisible"`. We want to map them to `true` and `false` respectively.
+*Mapp*ing sounds like a job for our already defined `fmap`. So let's use it again.
+
+```ruby
+visibility = Decoder.id.map { |output| output == "visible" ? true : false }
+
+visibility.run("visible") # => Ok(true)
+visibility.run("invisible") # => Ok(false)
+visibility.run("garbage") # => Ok(false)
+visibility.run(2) # => Ok(false)
+```
+
+This works, but it doesn't read very nice and for anything not `"visible"` or
+`"invisible"` it will always return `false`. Silencing errors like that is
+usually not a good idea. So, back to the drawing board.
+
+Looking at the header of this chapter we have `OR` as our top-level operator
+and _then_ do some kind of mapping. How would such an `a OR b` behave? It
+would probably try to decode `a` first and if it succeeds return the decoded
+value. Otherwise `OR` would try decoding `b` and return that.
+
+Here's what `OR` would look like in code---using `|` instead of `||` because `||` can't be defined as a method [^or-method]:
+
+```ruby
+class Decoder
+  def |(other)
+    Decoder.new do |input|
+      self.run(input) | other.run(input)
+    end
+  end
+end
+
+d = integer | Decoder.id
+d.run("2") # => Ok(2)
+d.run("a") # => Ok("a")
+```
+
+with `|` on `Result` being defined as:
+
+```ruby
+Ok(a)  | _ = Ok(a)
+Err(a) | b = b
+```
+
+With `Decoder#|` defined we need a way to match on `"visible"` and
+`"invisble"`. `Decoder.match("visible")` would look nice, so let's implement
+that:
+
+```ruby
+class Decoder
+  def self.match(constant)
+    self.new do |s|
+      if s == constant
+        Ok(s)
+      else
+        Err("'#{s}' doesn't match '#{constant}'")
+      end
+    end
+  end
+end
+
+Decoder.match("foo").run("foo") # => Ok(foo)
+Decoder.match("foo").run("bar") # => Err('bar' doesn't match 'foo')
+```
+
+Combining `match`, `fmap` and `|` we can now express our mapping from `"status"` to boolean flags:
+
+
+```ruby
+visibility = Decoder.match("visible").fmap { |_| true } |
+             Decoder.match("invisible").fmap { |_| false }
+
+visibility.run("visible") # => Ok(true)
+visibility.run("invisible") # => Err(false)
+visibility.run("foo") # => Err('foo' doesn't match 'invisible')
+```
+
+Using `fmap` and ignoring the parameter still feels a bit clunky. We can get
+rid of that by using `Decoder#>` which mirrors Haskell's
+[`$>`](http://hackage.haskell.org/package/base-4.12.0.0/docs/Data-Functor.html#v:-36--62-):
+
+```ruby
+class Decoder
+  def >(constant)
+    fmap { |_| constant }
+  end
+end
+
+visibility = (Decoder.match("visible") > true) |
+             (Decoder.match("invisible") > false)
+```
+
+### Extracting values out of hash maps (`{"center" => 23}` -> `23`)
+
+
+---
+
+When looking at the [running example](#running-example) the most common use-case
+seems to be to coerce a string to an integer. So, let's start with that.
+
+### The boilerplate
+
+
+#### A note on error handling for coercers
+
+Generally a coercer is a [partial
+function](https://en.wikipedia.org/wiki/Partial_function), meaning for some
+inputs there are no outputs---`"2019-13-51"` is not a valid date for example. In
+order to encode this we generally have three options: (a) raise an exception,
+(b) return `nil` or (c) use a [result
+type](https://en.wikipedia.org/wiki/Result_type). (b) is not an option at all,
+because it will make differentiating between a coerced `nil` and an error
+impossible (think JSON's `null`). We'll use (c) since this is the functional way
+of doing things and result types compose nicer than exceptions. This means our
+coercers will either return `Success` or `Error` [^either].
+
+_Outline:_
+
+* Explain common use-cases
+* What does already exist(?)
+* What is meant by a decoder?
+  * takes a primitive structure and decodes it to a more rich one.
+* Design goals/inspiration by Elm's decoder/parsec
+
+fo
+
+* Which methods return these "primitive" structures?
+  * `JSON.parse`
+  * `params` in Rails (and  oseveral other web libraries)
+  * `CSV.parse`
+
+* What is meant by a decoder?
+* The source input is some combination of `Hash`map, `Array` and `String`. JSON also has Numbers and Booleans, but these only make writing a decoder easier.
+* We're very lucky in Ruby to have all these methods to return roughly the same structure, so we could write on generic library to handle all these use cases.
+
+Except for `dry-schema` all of these take a DSL and configuration heavy
+approach. Inherently there's nothing wrong with this, but k
+
+
+
+Forms submitted through HTTP are stringly typed, meaning integers, booleans,
+dates, etc. are all transmitted as strings. At some point we want to convert these
+string values to the proper types. In Rails this is usually done at the database level:
+Instantiating a new ActiveRecord object auto-magically coerces the values to
+the correct types according to the database schema. This works for the most
+basic use cases, but for anything larger than a toy app we want to have a
+general solution at the HTTP boundary (called "controller" in Rails). Think
+search or report query forms.
+
+There exist several libraries which deal with this problem. For example:
+
+* [dry-types](https://github.com/dry-rb/dry-types)/[dry-validation](https://github.com/dry-rb/dry-validation)
+* [safe_type](https://github.com/chanzuckerberg/safe_type)
+* [coercible](https://github.com/solnic/coercible)
+
+However, a DSL and configuration heavy approach is common among them. This leads
+to some restrictions. For example, it is not possible to change the structure of
+a hash map without resorting to manual data manipulation after coercion.
+
+In this post we want to tackle the same problem (coercing arbitrary
+`params` hash maps to arbitrary Ruby objects [^also-json]) in a more functional, flexible and
+extensible way.
+
+_Disclaimer: Most of the ideas presented here are inspired by a mixture of the Haskell
+and Elm libraries [parsec](http://hackage.haskell.org/package/parsec),
+[Json.Encode](https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Encode)
+and
+[aeson](http://hackage.haskell.org/package/aeson-1.4.1.0/docs/Data-Aeson.html)._
+
+## What is type coercion?
+
+While _type coercion_ is often used in the context of programming languages and
+implicit type conversions (e.g. what Ruby does when interpreting `1.5 + 1`)
+[^wikiconversion], I'm using the term _coercer_ to describe a function which converts any type `a`
+to any type `b`. For example `-> (x) { x == "true" }` would be a coercer
+converting a `String` to a `Boolean`.
+
+
+
+
+<!---
+## Design Goals
+
+* _Composibility_: Coercers should be composable from smaller parts, meaning
+  we can reuse a coercer from `String` to `Date` to build a coercer from
+  `Array of String` to `Array of Date`.
+* _Flexibility_: It should be easy to express more complex coercions like
+  getting from the Hash `{"x" => "2", "y" => "3"}` to the instance `Point.new(2,
+  3)`. Many existing coercion libraries can't express these conversions since
+  their DSLs force a 1-to-1 relationship between source hash map and target hash
+  map onto the user.
+* _Extensibility_: It should be easy for users of the library to define their
+  own coercing rules---preferably by simply combining the provided building
+  blocks.
+-->
+
+
+
+TODO: Hier bin ich.
+
+### Converting a string to an integer (`"42" -> 42`)
+
+
+
+Looking at the hash maps in [Running example](#running-example) we foremost need
+a way to convert a `String` to an `Integer`. So, let's define a function to do
+so:
+
+```ruby
+integer = -> (s) {
+  Integer(s)
+}
+
+integer["2"] # => 2
+integer["a"] # => ArgumentError: invalid value for Integer(): "a"
+integer[nil] # => TypeError: can't convert nil into Integer
+```
+
+With both points addressed we end up with the following class:
+
+```ruby
+class Coercer
+  def initialize(&block)
+    @f = block
+  end
+
+  def run(value)
+    @f[value]
+  end
+
+  def self.integer
+    self.new do |s|
+      begin
+        Success.new(Integer(s))
+      rescue TypeError, ArgumentError
+        Error.new("'#{s}' is not an integer")
+      end
+    end
+  end
+end
+
+Coercer.integer.run("2") # => #<Success:0x00007fde11063050 @x=2>
+Coercer.integer.run("a") # => #<Error:0x00007fde1200fd78 @e="'a' is not an integer">
+```
+
+A coercion is a partial function from some value (e.g. `"2018-10-02"`) to some
+other value (e.g. `Date.new(2018, 10, 2)`). The function is partial because a
+coercion doesn't necessarily succeed. For example: `"2018-13-34"` doesn't
+represent a valid date, so it can't be coerced into `Date`.
+
+Therefore we can represent a coercion as a `lambda` returning either an object
+of class `Success` or an error represented by `Error`. Encoding the error case
+using `nil` wouldn't work because we couldn't tell an error and a successful
+coercion resulting in `nil` apart (e.g. JSON's `null` would be represented as
+`nil`).
+
+* They are functions from some type (e.g. `String`) to some other type (e.g.
+  `Date`).
+* A type coercion might either fail or succeed
+
+
+
+Let's start
+
+### Converting a String to an Integer (`"42" -> 42`)
+
+This one's easy:
+
+```ruby
+integer = -> (s) {
+  begin
+    Success.new(Integer(s))
+  rescue TypeError, ArgumentError
+    Error.new("'#{s}' is not an integer")
+  end
+}
+
+integer["42"] # => 42
+```
+
+Once we've wrapped everything in a class and took care of the sad path
+[^no-to-i]. After we've wrapped the
+
+function in a lambda and in a class `Coercer`---we might
+
+```ruby
+  43 + 2
+```
+
+### Converting a value (`"red" -> "RED"`)
+
+### Getting a value out of a hash map (`{"x" => "42"} -> 42`)
+
+### Alternatives (`||` or `|`)
+
+TODO: is `||` left/right associative?
+
+```ruby
+
+```
+
+
+[^also-json]: Since the results of parsing JSON and XML objects are also hash
+maps with a very similar structure to `params` we would be able to reuse most
+coercers in that context.
+[^wikiconversion]: [https://en.wikipedia.org/wiki/Type_conversion](https://en.wikipedia.org/wiki/Type_conversion)
+[^success-definition]: TODO: See github-link for possible implementation of `Success` and
+`Error`.
+[^no-to-i]: I choose `Integer` instead of `to_i` since `to_i` returns `0` if it
+can't find a number in the string: `"a".to_i # => 0`
+[^fmap]: fmap historic mistake;
+[^either]: See Rust's [`std::result](https://doc.rust-lang.org/std/result/) for
+an implementation.
+[^deadline]: Yes, this is a real-world example. I'm fine, thanks.
+[^type-system]: One might argue that a dynamically typed language like Ruby
+has less use for explicit decoders because of duck typing. But I'd argue
+otherwise: It's especially important to get the type conversion right,
+because there's no assistance from a type system if you mess up.
+[^fmap]: The name comes from the `Functor` typeclass in Haskell:
+  [https://wiki.haskell.org/Functor](https://wiki.haskell.org/Functor). They avoided calling it `map` because `map`
+  leads to better error message for beginners
+  ([source](https://wiki.haskell.org/Typeclassopedia#Instances)).
+[^or-method]: [http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions](http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions)

@@ -5,6 +5,9 @@ import           Hakyll
 
 
 --------------------------------------------------------------------------------
+
+-- For math output see http://travis.athougies.net/posts/2013-08-13-using-math-on-your-hakyll-blog.html
+
 main :: IO ()
 main = hakyll $ do
     match "images/*" $ do
@@ -22,6 +25,12 @@ main = hakyll $ do
             >>= relativizeUrls
 
     match "posts/*" $ do
+        route $ setExtension "html"
+        compile $ pandocCompiler
+            >>= loadAndApplyTemplate "templates/post.html"    postCtx
+            >>= loadAndApplyTemplate "templates/default.html" postCtx
+            >>= relativizeUrls
+    match "drafts/*" $ do
         route $ setExtension "html"
         compile $ pandocCompiler
             >>= loadAndApplyTemplate "templates/post.html"    postCtx
