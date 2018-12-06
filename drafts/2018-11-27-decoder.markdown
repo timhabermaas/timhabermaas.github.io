@@ -2,12 +2,16 @@
 title: "A Composable (params/JSON) Decoder Library for Ruby"
 ---
 
-[Show me the code!](#the-result)
+TODO: I use "a bunch" a lot...
+TODO: Check for TODOs
 
-The values returned from Ruby's `JSON.parse`, Ruby's `CSV.parse`, Rails'
-`params` and savon's SOAP responses all have one thing in common: They are a
-subset ^[TODO: subset necessary to describe what I mean?] of some combination of
-the following types:
+[Show me the code!](https://github.com/timhabermaas/timhabermaas.github.io/blob/develop/code/decoder.rb)
+
+In this blog post I want to build a highly composable and extensible library for decoding Ruby values into user defined data types. This library can be used as a replacement for [strong_parameters](https://edgeguides.rubyonrails.org/action_controller_overview.html#strong-parameters) or as the necessary data wrangling step after `JSON.parse`, `CSV.parse`, etc.
+
+
+The values returned from Ruby's `JSON.parse` and `CSV.parse`, Rails'
+`params` and savon's SOAP responses all have one thing in common: They consist solely of some combination of these types:
 
 * `Integer`
 * `Float`
@@ -17,49 +21,74 @@ the following types:
 * `Array`
 
 This might not seem like such a big deal, but being able to handle all return
-values identically let's write one generic decoder library.
+values identically makes it possible to write one generic decoder library
+which handles several use cases at once.
 
 ## What is a decoder?
 
-_Decoder_ has a bunch of meanings. I have the following hand-wavy definition in mind:
+Depending on context _decoder_ has multiple meanings. For the purpose of this
+blog post (and the library we're building) I have the following hand-wavy
+definition in mind:
 
-^[TODO: object graph sounds weird, skip a formal definition? "For the purpose of this post"]
-> A decoder is a partial function which converts one object graph into another.
+> A decoder is a partial function which converts one object (graph) into another object (graph).
 
-_partial_ simply means that a decode might not succeed (think trying to
-interpret `"a"` as an integer).
+_Object graph_ refers to one specific Ruby object in memory and _partial_
+simply means that a decoder might not necessarily succeed (think trying to
+convert `"a"` to an integer).
 
-Sometimes such functionality is also called _coercing_, but coercing is
-already an [overloaded term in Ruby](https://apidock.com/ruby/Numeric/coerce)
-and used when [talking about strong/weak type
-systems](https://en.wikipedia.org/wiki/Type_conversion). So, I'll stick to
-calling it _decoding_.
+So, a decoder would for example take an array with two elements and turn it
+into a hash map with two keys: `[2, 3]` -> `{x: 2, y: 3}`
 
-## Why do I need one?
+#### Coercer, Decoder, Serializer? 🤔
 
-You don't[^type-system], but for larger applications it's very useful to convert values
-received at the boundaries of your system (HTTP, file system, database, ...)
-to values the rest of your program can work with. Sprinkling a bunch of
-`Date.parse` throughout your app gets tiresome fast. A bunch of examples:
+^[TODO: Remove this paragraph? What's the purpose?]
+There seems to be some overlap between the terms _decoder_, _coercer_ and _serializer_.
+
+* _serializer_: Mostly concerned with stuff being sent over the wire, close to
+  parsing; operates on strings or bytes.
+* _coercer_: Concerned with [type
+  converting](https://en.wikipedia.org/wiki/Type_conversion) of a single value,
+  not for an entire object graph.
+* _decoder_: Concerned with converting things from one representation to
+  another, usually in-memory.
+
+## Why do I need a decoder?
+
+It's very likely that you're already doing some conversion in your
+application/library. So, the question becomes: Do you need to write an
+explicit decoder or can you get by with some ad-hoc `Array#map`, `Date.parse`
+and `Hash#[]` calls?
+
+Technically you don't[^type-system], but for larger applications it becomes
+very useful to convert values received at the boundaries of your system
+(HTTP, file system, database, ...) to values the rest of your program can
+work with. Sprinkling a bunch of `Date.parse` throughout your app gets
+tiresome fast. Some examples for when you might want to use an explicit
+decoder:
 
 * converting String values (`"2018-10-02"`, `"true"`, `"42"`) to the proper types (`Date`, `TrueClass`, `Integer`)
 * interpreting `nil`s correctly (sometimes they mean the absence of values, sometimes they mean infinity)
-* dealing with badly designed APIs (`"2999-12-31"` might mean "no deadline" [^deadline])
-^[TODO: tagged unions might be another example (`{type: "..."}`)]
+* dealing with badly designed APIs (the date `"2999-12-31"` might mean "no deadline" [^deadline])
 
-## Existing solutions and their shortcomings(?)
+## Design goals & existing approaches
 
-^[TODO: what sets this library apart is that a decoder is a value which can be passed around and extended freely.]
+We strive for the following properties:
 
-Some of these use cases are already handled by `ActiveRecord`, but it can
-only be leveraged for the most basic CRUD applications. Therefore several
-gems were created to deal with this problem.
+* _Composibility_: Decoders should be values so they can be passed to function
+  and composed in arbitrary ways.
+* _Flexibility_: It should be easy to express more or less arbitrary decodings.
+* _Extensibility_: It should be easy for users of the library to define their
+  own decoders---preferably by simply combining the provided building blocks.
 
-* [dry-types](https://github.com/dry-rb/dry-types)/[dry-validation](https://github.com/dry-rb/dry-validation)
-* [safe_type](https://github.com/chanzuckerberg/safe_type)
-* [coercible](https://github.com/solnic/coercible)
-
-TODO: They take a DSL heavy approach.
+Most existing libraries which provide some kind of input coercion, decoding
+or validation take a DSL and/or configuration heavy approach.
+[^existing-libraries] This makes it difficult to reuse or build abstractions
+on top of decoders without extending the DSL itself.
+It's also common for existing libraries to either tie the decoding to a
+specific class---meaning there has to be a 1-to-1 relationship between
+possible decodings and how the class can be constructed---or only return a
+hash map as a result---meaning there has to be a 1-to-1 relationship between
+input hash keys and output hash keys.
 
 ## Running example
 
@@ -101,13 +130,13 @@ decoder.run(p1) # => Circle.new(Point.new(10, 12), 4, "RED", true)
 decoder.run(p2) # => Rectangle.new(Point.new(0, 3), Point.new(4, 8), "BLUE", false)
 ```
 
-The conversion from the hash(es) `p1` and `p2` to the Ruby object is not
-straightforward at all. A couple of points to note:
+The conversion from the hash(es) `p1` and `p2` to their respective Ruby
+objects is not straightforward at all. A couple of points to note:
 
 * Depending on the value of `"type"` the decoder returns either a `Circle` or a
   `Rectangle`.
 * The representation of the rectangle in `p2` differs from the one we use in
-  our Ruby class `Rectangle` (point + width + height vs point + point).
+  our Ruby class `Rectangle` (point, width, height vs point, point).
 * The `"color"` field is transmitted using lowercase, but we want to convert it
   to uppercase.
 * `"status"` is either `"visible"` or `"invisible"`---on the Ruby side we want
@@ -115,16 +144,19 @@ straightforward at all. A couple of points to note:
 
 ## Building it
 
-^[TODO: talk about inspiration]
+_Note: The design of this library is heavily inspired by libraries like
+[Json.Decode](https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Decode),
+[aeson](http://hackage.haskell.org/package/aeson-1.4.2.0) and
+[parsec](http://hackage.haskell.org/package/parsec)._
 
-Let's start with the most simple decoder: The identity decoder^[TODO: add
-wikilink] which just returns its input.
+Let's start with the most simple decoder: The
+[identity](https://en.wikipedia.org/wiki/Identity_function) decoder which
+just returns its input.
 
 Since a decoder is a partial function we can use a `lambda` to represent it
-and take care of the partiality by using a result/either type [^either]. We
-could use an option type as well, but the additional error messages will be
-invaluable when figuring out why a decoder didn't return the expected
-results.
+and take care of the partiality by using a result/either type [^either]. The
+`Err` values represent failed decodings and include an error message and the
+`Ok` values represent successful decodings.
 
 ```ruby
 id_decoder = -> (input) { Ok(input) }
@@ -154,8 +186,8 @@ end
 Decoder.id.run("23") # => "Ok(23)"
 ```
 
-Alright, now we're all set to tackle the first real problem: Getting from a
-string to an integer.
+Alright, this is all the boilerplate we'll need. Now we're ready to tackle
+the first real problem: Getting from a string to an integer.
 
 ### String to integer (`"42" -> 42`)
 
@@ -201,6 +233,8 @@ class Decoder
 end
 ```
 
+`fmap` first runs the input through the decoder and afterwards passes the
+value into the provided block.
 `Decoder#fmap` is very similar to `Array#map` in that it "maps" a function
 over the element(s). However, I chose to not call it `map` [^fmap] to make it less
 confusing when reading code which deals with decoders and arrays at the same
@@ -216,7 +250,8 @@ color = Decoder.id.fmap(&:upcase)
 color.run("red") # => Ok("RED")
 ```
 
-We're almost finished converting the values of `p1` or `p2`, the only thing left is the `"status"` key and its possible values.
+We're almost finished converting the values of `p1` or `p2`, the only thing
+left is the `"status"` key and its possible values.
 
 ### Alternatives (`"visible"` -> `true` OR `"invisible"` -> `false`)
 
@@ -232,7 +267,7 @@ visibility.run("garbage") # => Ok(false)
 visibility.run(2) # => Ok(false)
 ```
 
-This works, but it doesn't read very nice and for anything not `"visible"` or
+This works, but it doesn't read very well and for anything not `"visible"` or
 `"invisible"` it will always return `false`. Silencing errors like that is
 usually not a good idea. So, back to the drawing board.
 
@@ -312,9 +347,124 @@ visibility = (Decoder.match("visible") > true) |
              (Decoder.match("invisible") > false)
 ```
 
-### Extracting values out of hash maps (`{"center" => 23}` -> `23`)
+### Extracting values from hash maps (`{"center" => 23}` -> `23`)
+
+So far we can only decode simple values, but not larger structures like `Hash` or `Array`. We have a couple of ways to decode hash maps. Typically this is done through a DSL similar to the following:
+
+```ruby
+decode_hash(
+  foo: integer,
+  bar: visibility
+)
+```
+
+However, this is too restrictive for our use case since we're coupling the
+structure of the input hash map to the structure of the output hash map. This
+would leave us with some additional data wrangling which we'd like to avoid.
+So, what's the alternative? Both Haskell's
+[`aeson`](http://hackage.haskell.org/package/aeson-1.4.2.0/docs/Data-Aeson.html#v:.:)
+and Elm's
+[`Json.Decode`](https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Decode#field)
+define functions which (given a key name) extract just a single value from a
+hash map. So, we try to do the same:
+
+```ruby
+class Decoder
+  def self.from_key(key, value_decoder)
+    self.new do |hash|
+      next Err("'#{hash}' doesn't contain key '#{key}'") unless hash.has_key?(key)
+
+      decoder.run(hash.fetch(key))
+    end
+  end
+end
+
+Decoder.from_key("foo", integer).run({"foo" => "2"}) # => Ok(2)
+Decoder.from_key("foo", integer).run({"bar" => "2"}) # => Err()
+```
+
+A quick note on symbols vs strings as map keys: [^symbol-vs-string]
+
+So far so good. We can now try to decode a `Point` (remember, it was
+represented as `{"x" => "3", "y" => "4"}`):
+
+```ruby
+x = Decoder.from_key("x", integer)
+y = Decoder.from_key("y", integer)
+
+point = Point.new # ???
+```
+
+Well, we're stuck. We currently have no way to combine two decoders into one.
+All we have right now is `fmap` which takes one decoder and returns a new
+one. We need some kind of merge to get from `x`, `y` to `point`, though.
+
+So, what if we take the idea of mapping over a decoder and extend it to two
+decoders?
+
+```ruby
+class Decoder
+  def self.map2(a, b)
+    self.new do |input|
+      a.run(input).then do |result1|
+        b.run(input).then do |result2|
+          Ok(yield result1, result2)
+        end
+      end
+    end
+  end
+end
+
+point = Decoder.map2(x, y) { |x, y| Point.new(x, y) }
+
+point.run({"x" => "3", "y" => "4"}) # => Ok(Point(3, 4))
+```
+
+At this point (ha!) we have all ingredients for decoding a `Circle` and a `Rectangle`:
+
+```ruby
+circle =
+  Decoder.map_n(
+    Decoder.from_key("center", point),
+    Decoder.from_key("radius", integer),
+    Decoder.from_key("color", color),
+    Decoder.from_key("status", visibility)
+  ) do |center, radius, color, visibility|
+    Circle.new(center, radius, color, visibility)
+  end
+
+rectangle =
+  Decoder.map_n(
+    Decoder.from_key("topLeft", point),
+    Decoder.from_key("width", integer),
+    Decoder.from_key("height", integer),
+    Decoder.from_key("color", color),
+    Decoder.from_key("status", visibility)
+  ) do |top_left, width, height, color, visible|
+    Rectangle.new(top_left, Point.new(top_left.x + width, top_left.y + height), color, visible)
+  end
+```
+
+_`Decoder.map_n` is just a natural extension of `map2`, [the code](https://github.com/timhabermaas/timhabermaas.github.io/blob/develop/code/decoder.rb#L140) is left as an exercise for the reader._
 
 
+### Making decisions
+
+TODO
+
+### Bonus functions
+
+* `Decoder.at :: Int -> Decoder a -> Decoder a`
+* `Decoder.from_key? :: Key -> Decoder a -> Decoder a`
+
+## Conclusion
+
+TODO
+
+*
+
+
+<!--
 ---
 
 When looking at the [running example](#running-example) the most common use-case
@@ -400,7 +550,6 @@ converting a `String` to a `Boolean`.
 
 
 
-<!---
 ## Design Goals
 
 * _Composibility_: Coercers should be composable from smaller parts, meaning
@@ -414,7 +563,6 @@ converting a `String` to a `Boolean`.
 * _Extensibility_: It should be easy for users of the library to define their
   own coercing rules---preferably by simply combining the provided building
   blocks.
--->
 
 
 
@@ -521,10 +669,9 @@ TODO: is `||` left/right associative?
 
 ```
 
+-->
 
-[^also-json]: Since the results of parsing JSON and XML objects are also hash
-maps with a very similar structure to `params` we would be able to reuse most
-coercers in that context.
+
 [^wikiconversion]: [https://en.wikipedia.org/wiki/Type_conversion](https://en.wikipedia.org/wiki/Type_conversion)
 [^success-definition]: TODO: See github-link for possible implementation of `Success` and
 `Error`.
@@ -532,14 +679,24 @@ coercers in that context.
 can't find a number in the string: `"a".to_i # => 0`
 [^fmap]: fmap historic mistake;
 [^either]: See Rust's [`std::result](https://doc.rust-lang.org/std/result/) for
-an implementation.
-[^deadline]: Yes, this is a real-world example. I'm fine, thanks.
+an implementation. TODO: Check that we're actually using the same implementation
+[^deadline]: Yes, this is a real-world example from integrating with an external system. Shit's gonna hit the fan in ~981 years.
 [^type-system]: One might argue that a dynamically typed language like Ruby
 has less use for explicit decoders because of duck typing. But I'd argue
 otherwise: It's especially important to get the type conversion right,
-because there's no assistance from a type system if you mess up.
+because there's no assistance from a type system in case you mess up.
 [^fmap]: The name comes from the `Functor` typeclass in Haskell:
   [https://wiki.haskell.org/Functor](https://wiki.haskell.org/Functor). They avoided calling it `map` because `map`
   leads to better error message for beginners
   ([source](https://wiki.haskell.org/Typeclassopedia#Instances)).
 [^or-method]: [http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions](http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions)
+[^symbol-vs-string]: In case you need to decode a hash map which uses either symbols or strings as keys and you don't know which it is, you simply could define a new decoder which takes care of both:
+    ```ruby
+    def from_key_indifferent(sym_or_string, decoder)
+      from_key(sym_or_string.to_s, decoder) || from_key(sym_or_string.to_sym, decoder)
+    end
+    ```
+[^existing-libraries]:
+    * [safe_type](https://github.com/chanzuckerberg/safe_type)
+    * [dry-types](https://github.com/dry-rb/dry-types) / [dry-validation](https://github.com/dry-rb/dry-validation)
+    * [coercible](https://github.com/solnic/coercible)

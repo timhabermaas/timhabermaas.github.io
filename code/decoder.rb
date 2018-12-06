@@ -48,6 +48,14 @@ class Ok
   end
 end
 
+def Ok(v)
+  Ok.new(v)
+end
+
+def Err(m)
+  Err.new(m)
+end
+
 class Decoder
   def initialize(&block)
     @f = block
@@ -63,7 +71,7 @@ class Decoder
       if result.error?
         result
       else
-        Ok.new(yield result.unwrap)
+        Ok(yield result.unwrap)
       end
     end
   end
@@ -97,47 +105,46 @@ class Decoder
   def self.integer
     self.new do |s|
       begin
-        Ok.new(Integer(s))
+        Ok(Integer(s))
       rescue TypeError, ArgumentError
-        Err.new("'#{s}' is not an integer")
+        Err("'#{s}' is not an integer")
       end
     end
   end
 
   def self.id
     self.new do |s|
-      Ok.new(s)
+      Ok(s)
     end
   end
 
   def self.succeed(v)
     self.new do |_|
-      Ok.new(v)
+      Ok(v)
     end
   end
 
   def self.fail(e)
     self.new do |_|
-      Err.new(e)
+      Err(e)
     end
   end
 
   def self.match(constant)
     self.new do |s|
-      s == constant ? Ok.new(s) : Err.new("'#{s}' doesn't match '#{constant}'")
+      s == constant ? Ok(s) : Err("'#{s}' doesn't match '#{constant}'")
     end
   end
 
   def self.from_key(key, decoder)
     self.new do |hash|
-      return Err.new("'#{hash}' is not of type Hash") unless hash.is_a?(Hash)
-      return Err.new("'#{hash}' doesn't contain key '#{key}'") unless hash.has_key?(key)
+      next Err("'#{hash}' doesn't contain key '#{key}'") unless hash.has_key?(key)
 
       decoder.run(hash.fetch(key))
     end
   end
 
-  def self.mapN(*decoders, &block)
+  def self.map_n(*decoders, &block)
     raise "decoder count must match argument count of provided block" unless decoders.size == block.arity
 
     self.new do |input|
@@ -149,7 +156,7 @@ class Decoder
       if first_error
         first_error
       else
-        Ok.new(block.call(*results.map(&:unwrap)))
+        Ok(block.call(*results.map(&:unwrap)))
       end
     end
   end
@@ -158,7 +165,7 @@ class Decoder
     self.new do |x|
       decoder1.run(x).then do |result1|
         decoder2.run(x).then do |result2|
-          Ok.new(yield result1, result2)
+          Ok(yield result1, result2)
         end
       end
 
@@ -190,7 +197,7 @@ visibility = (Decoder.match("visible") > true) |
 color = Decoder.id.fmap(&:upcase)
 
 circle =
-  Decoder.mapN(
+  Decoder.map_n(
     Decoder.from_key("center", point),
     Decoder.from_key("radius", Decoder.integer),
     Decoder.from_key("color", color),
@@ -200,7 +207,7 @@ circle =
   end
 
 rectangle =
-  Decoder.mapN(
+  Decoder.map_n(
     Decoder.from_key("topLeft", point),
     Decoder.from_key("width", Decoder.integer),
     Decoder.from_key("height", Decoder.integer),
@@ -228,7 +235,7 @@ p1 = {
   },
   "radius" => "4",
   "color" => "red",
-  "status" => "visible2"
+  "status" => "visible"
 }
 
 p2 = {
