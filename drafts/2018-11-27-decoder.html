@@ -1,0 +1,561 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>A Composable (params/JSON) Decoder Library for Ruby &middot Tim Habermaas</title>
+        <link rel="stylesheet" type="text/css" href="../css/site.css" />
+        <link rel="stylesheet" type="text/css" href="../css/syntax.css" />
+    </head>
+    <body>
+      <div class="container content">
+        <header class="masthead masthead-title">
+          <h3>
+            <a href="../">f = -> (x) { x }</a>
+          </h3>
+          &nbsp;&nbsp;&nbsp;&nbsp;
+          <small>
+            <a href="../">Posts</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../about.html">About</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../contact.html">Contact</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../pgp.html">PGP Key</a>
+          </small>
+        </header>
+        <main>
+          <div class="posts">
+            <article class="post">
+              <h1 class="post-title">
+                A Composable (params/JSON) Decoder Library for Ruby
+              </h1>
+
+              <time datetime="2018-11-27T00:00:00" class="post-date">November 27, 2018</time>
+
+<p>TODO: I use “a bunch” a lot… TODO: Check for TODOs</p>
+<p><a href="https://github.com/timhabermaas/timhabermaas.github.io/blob/develop/code/decoder.rb">Show me the code!</a></p>
+<p>In this blog post I want to build a highly composable and extensible library for decoding Ruby values into user defined data types. This library can be used as a replacement for <a href="https://edgeguides.rubyonrails.org/action_controller_overview.html#strong-parameters">strong_parameters</a> or as the necessary data wrangling step after <code>JSON.parse</code>, <code>CSV.parse</code>, etc.</p>
+<p>The values returned from Ruby’s <code>JSON.parse</code> and <code>CSV.parse</code>, Rails’ <code>params</code> and savon’s SOAP responses all have one thing in common: They consist solely of some combination of these types:</p>
+<ul>
+<li><code>Integer</code></li>
+<li><code>Float</code></li>
+<li><code>String</code></li>
+<li><code>TrueClass</code>/<code>FalseClass</code></li>
+<li><code>Hash</code></li>
+<li><code>Array</code></li>
+</ul>
+<p>This might not seem like such a big deal, but being able to handle all return values identically makes it possible to write one generic decoder library which handles several use cases at once.</p>
+<h2 id="what-is-a-decoder">What is a decoder?</h2>
+<p>Depending on context <em>decoder</em> has multiple meanings. For the purpose of this blog post (and the library we’re building) I have the following hand-wavy definition in mind:</p>
+<blockquote>
+<p>A decoder is a partial function which converts one object (graph) into another object (graph).</p>
+</blockquote>
+<p><em>Object graph</em> refers to one specific Ruby object in memory and <em>partial</em> simply means that a decoder might not necessarily succeed (think trying to convert <code>&quot;a&quot;</code> to an integer).</p>
+<p>So, a decoder would for example take an array with two elements and turn it into a hash map with two keys: <code>[2, 3]</code> -&gt; <code>{x: 2, y: 3}</code></p>
+<h4 id="coercer-decoder-serializer">Coercer, Decoder, Serializer? 🤔</h4>
+<p><a href="#fn1" class="footnoteRef" id="fnref1"><sup>1</sup></a> There seems to be some overlap between the terms <em>decoder</em>, <em>coercer</em> and <em>serializer</em>.</p>
+<ul>
+<li><em>serializer</em>: Mostly concerned with stuff being sent over the wire, close to parsing; operates on strings or bytes.</li>
+<li><em>coercer</em>: Concerned with <a href="https://en.wikipedia.org/wiki/Type_conversion">type converting</a> of a single value, not for an entire object graph.</li>
+<li><em>decoder</em>: Concerned with converting things from one representation to another, usually in-memory.</li>
+</ul>
+<h2 id="why-do-i-need-a-decoder">Why do I need a decoder?</h2>
+<p>It’s very likely that you’re already doing some conversion in your application/library. So, the question becomes: Do you need to write an explicit decoder or can you get by with some ad-hoc <code>Array#map</code>, <code>Date.parse</code> and <code>Hash#[]</code> calls?</p>
+<p>Technically you don’t<a href="#fn2" class="footnoteRef" id="fnref2"><sup>2</sup></a>, but for larger applications it becomes very useful to convert values received at the boundaries of your system (HTTP, file system, database, …) to values the rest of your program can work with. Sprinkling a bunch of <code>Date.parse</code> throughout your app gets tiresome fast. Some examples for when you might want to use an explicit decoder:</p>
+<ul>
+<li>converting String values (<code>&quot;2018-10-02&quot;</code>, <code>&quot;true&quot;</code>, <code>&quot;42&quot;</code>) to the proper types (<code>Date</code>, <code>TrueClass</code>, <code>Integer</code>)</li>
+<li>interpreting <code>nil</code>s correctly (sometimes they mean the absence of values, sometimes they mean infinity)</li>
+<li>dealing with badly designed APIs (the date <code>&quot;2999-12-31&quot;</code> might mean “no deadline” <a href="#fn3" class="footnoteRef" id="fnref3"><sup>3</sup></a>)</li>
+</ul>
+<h2 id="design-goals-existing-approaches">Design goals &amp; existing approaches</h2>
+<p>We strive for the following properties:</p>
+<ul>
+<li><em>Composibility</em>: Decoders should be values so they can be passed to function and composed in arbitrary ways.</li>
+<li><em>Flexibility</em>: It should be easy to express more or less arbitrary decodings.</li>
+<li><em>Extensibility</em>: It should be easy for users of the library to define their own decoders—preferably by simply combining the provided building blocks.</li>
+</ul>
+<p>Most existing libraries which provide some kind of input coercion, decoding or validation take a DSL and/or configuration heavy approach. <a href="#fn4" class="footnoteRef" id="fnref4"><sup>4</sup></a> This makes it difficult to reuse or build abstractions on top of decoders without extending the DSL itself. It’s also common for existing libraries to either tie the decoding to a specific class—meaning there has to be a 1-to-1 relationship between possible decodings and how the class can be constructed—or only return a hash map as a result—meaning there has to be a 1-to-1 relationship between input hash keys and output hash keys.</p>
+<p>We want to avoid these issues.</p>
+<h2 id="running-example">Running example</h2>
+<p>Let’s assume we’re tasked to decode the following hash maps to their respective Ruby representations (see end of code listing). We’ll use this concrete example as a guide throughout this post.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="co"># p1 and p2 are two possible shapes for the same form params</span>
+p1 = {
+  <span class="st">&quot;type&quot;</span> =&gt; <span class="st">&quot;circle&quot;</span>,
+  <span class="st">&quot;center&quot;</span> =&gt; {
+    <span class="st">&quot;x&quot;</span> =&gt; <span class="st">&quot;10&quot;</span>,
+    <span class="st">&quot;y&quot;</span> =&gt; <span class="st">&quot;12&quot;</span>
+  },
+  <span class="st">&quot;radius&quot;</span> =&gt; <span class="st">&quot;4&quot;</span>,
+  <span class="st">&quot;color&quot;</span> =&gt; <span class="st">&quot;red&quot;</span>,
+  <span class="st">&quot;status&quot;</span> =&gt; <span class="st">&quot;visible&quot;</span>
+}
+
+p2 = {
+  <span class="st">&quot;type&quot;</span> =&gt; <span class="st">&quot;rectangle&quot;</span>,
+  <span class="st">&quot;topLeft&quot;</span> =&gt; {
+    <span class="st">&quot;x&quot;</span> =&gt; <span class="st">&quot;0&quot;</span>,
+    <span class="st">&quot;y&quot;</span> =&gt; <span class="st">&quot;3&quot;</span>
+  },
+  <span class="st">&quot;width&quot;</span> =&gt; <span class="st">&quot;4&quot;</span>,
+  <span class="st">&quot;height&quot;</span> =&gt; <span class="st">&quot;5&quot;</span>,
+  <span class="st">&quot;color&quot;</span> =&gt; <span class="st">&quot;blue&quot;</span>,
+  <span class="st">&quot;status&quot;</span> =&gt; <span class="st">&quot;invisible&quot;</span>
+}
+
+<span class="kw">def</span> decoder
+  <span class="co"># TODO</span>
+<span class="kw">end</span>
+
+decoder.run(p1) <span class="co"># =&gt; Circle.new(Point.new(10, 12), 4, &quot;RED&quot;, true)</span>
+decoder.run(p2) <span class="co"># =&gt; Rectangle.new(Point.new(0, 3), Point.new(4, 8), &quot;BLUE&quot;, false)</span></code></pre></div>
+<p>The conversion from the hash(es) <code>p1</code> and <code>p2</code> to their respective Ruby objects is not straightforward at all. A couple of points to note:</p>
+<ul>
+<li>Depending on the value of <code>&quot;type&quot;</code> the decoder returns either a <code>Circle</code> or a <code>Rectangle</code>.</li>
+<li>The representation of the rectangle in <code>p2</code> differs from the one we use in our Ruby class <code>Rectangle</code> (point, width, height vs point, point).</li>
+<li>The <code>&quot;color&quot;</code> field is transmitted using lowercase, but we want to convert it to uppercase.</li>
+<li><code>&quot;status&quot;</code> is either <code>&quot;visible&quot;</code> or <code>&quot;invisible&quot;</code>—on the Ruby side we want to set a visibility flag to either <code>true</code> or <code>false</code>.</li>
+</ul>
+<h2 id="building-it">Building it</h2>
+<p><em>Note: The design of this library is heavily inspired by libraries like <a href="https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Decode">Json.Decode</a>, <a href="http://hackage.haskell.org/package/aeson-1.4.2.0">aeson</a> and <a href="http://hackage.haskell.org/package/parsec">parsec</a>.</em></p>
+<p>Let’s start with the most simple decoder: The <a href="https://en.wikipedia.org/wiki/Identity_function">identity</a> decoder which just returns its input.</p>
+<h4 id="how-to-represent-partial-functions">How to represent partial functions</h4>
+<p>Since a decoder is a just a partial function we can use a <code>lambda</code> to represent it. Yey, taking care of the partiality isn’t as straightforward. We basically have three options for indicating a failed decoder:</p>
+<ol style="list-style-type: decimal">
+<li>Return <code>nil</code></li>
+<li>Return an result/either type</li>
+<li>Raise an exception</li>
+</ol>
+<p><em>1.</em> won’t work since we wouldn’t be able to distinguish a successful decode with the result of <code>nil</code> (think decoding JSON’s <code>null</code>) from an error. <em>2.</em> is my preferred approach, because result values can be easier composed than exceptions. However, using <code>Ok</code>/<code>Err</code> will make it harder to follow this blog post and the implementation of some methods will become trivial.<a href="#fn5" class="footnoteRef" id="fnref5"><sup>5</sup></a> Therefore I’ll use exceptions to indicate an unsuccessful conversion. For the result type version see the <a href="https://github.com/timhabermaas/timhabermaas.github.io/blob/develop/code/decoder.rb">linked code</a>.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">id_decoder = -&gt; (input) { input }
+id_decoder[<span class="st">&quot;23&quot;</span>] <span class="co"># =&gt; &quot;23&quot;</span></code></pre></div>
+<p>Composing different decoders will require us to define methods on a decoder, so let’s wrap that lambda in a class so we don’t need to monkey patch <code>Proc</code>.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">class</span> <span class="dt">Failed</span> &lt; <span class="dt">StandardError</span>; <span class="kw">end</span>
+
+  <span class="kw">def</span> initialize(&amp;block)
+    <span class="ot">@f</span> = block
+  <span class="kw">end</span>
+
+  <span class="kw">def</span> run(value)
+    <span class="ot">@f</span>[value]
+  <span class="kw">end</span>
+
+  <span class="kw">def</span> <span class="dv">self</span>.id
+    new <span class="kw">do</span> |input|
+      input
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="dt">Decoder</span>.id.run(<span class="st">&quot;23&quot;</span>) <span class="co"># =&gt; &quot;Ok(23)&quot;</span></code></pre></div>
+<p>Alright, this is all the boilerplate we’ll need. Now we’re ready to tackle the first real problem: Getting from a string to an integer.</p>
+<h3 id="string-to-integer-42---42">String to integer (<code>&quot;42&quot; -&gt; 42</code>)</h3>
+<p>We’ll use <code>Integer</code> for strict conversion from strings to integers. <code>to_i</code> just returns <code>0</code> when given invalid input. That’s usually not what we want.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">integer = <span class="dt">Decoder</span>.new <span class="kw">do</span> |input|
+  <span class="kw">begin</span>
+    <span class="dt">Integer</span>(input) <span class="co"># Integer(nil) raises a TypeError</span>
+  <span class="kw">rescue</span> <span class="dt">TypeError</span>, <span class="dt">ArgumentError</span>
+    raise <span class="dt">Decoder</span>::<span class="dt">Failed</span>, <span class="st">&quot;'</span><span class="ot">#{</span>input.inspect<span class="ot">}</span><span class="st">' is not an integer&quot;</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+integer.run(<span class="st">&quot;123&quot;</span>) <span class="co"># =&gt; 123</span>
+integer.run(<span class="st">&quot;a123&quot;</span>) <span class="co"># =&gt; Decoder::Failed: '&quot;a123&quot;' is not an integer</span></code></pre></div>
+<p>The code should be pretty straightforward: On every input which is not convertible to a number we raise an exception.</p>
+<h3 id="converting-a-string-to-uppercase-red---red">Converting a string to uppercase (<code>&quot;red&quot;</code> -&gt; <code>&quot;RED&quot;</code>)</h3>
+<p>Remember that the color name of a shape is passed in as lowercase, but our backend needs it to be uppercase? At this point we could define another custom decoder which takes a string and returns its uppercase variant. But what happens if we have to decode in the opposite direction—from uppercase to lowercase? Or change a number from 0-indexed to 1-indexed—by adding 1 to the decoded value? Writing custom decoders for each of these seems like a lot of unnecessary work.</p>
+<p>All these use cases have one thing in common: We want to call a function on the decoded value. So, let’s add a way to do so to <code>Decoder</code>:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">def</span> fmap
+    <span class="dt">Decoder</span>.new <span class="kw">do</span> |input|
+      <span class="kw">yield</span> run(input)
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<p><code>fmap</code> first runs the decoder with the provided input and afterwards yields to the prodived block. <code>Decoder#fmap</code> is very similar to <code>Array#map</code> in that it “maps” a function over the element(s). However, I chose to not call it <code>map</code> <a href="#fn6" class="footnoteRef" id="fnref6"><sup>6</sup></a> to make it less confusing when reading code which deals with decoders and arrays at the same time.</p>
+<p>We can now express our color decoder using <code>fmap</code>:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">color = <span class="dt">Decoder</span>.id.fmap { |output| output.upcase }
+<span class="co"># or shorter</span>
+color = <span class="dt">Decoder</span>.id.fmap(&amp;<span class="st">:upcase</span>)
+
+color.run(<span class="st">&quot;red&quot;</span>) <span class="co"># =&gt; &quot;RED&quot;</span></code></pre></div>
+<p>We’re almost finished converting the values of <code>p1</code> or <code>p2</code>, the only thing left is the <code>&quot;status&quot;</code> key and its possible values.</p>
+<h3 id="alternatives-visible---true-or-invisible---false">Alternatives (<code>&quot;visible&quot;</code> -&gt; <code>true</code> OR <code>&quot;invisible&quot;</code> -&gt; <code>false</code>)</h3>
+<p><code>&quot;status&quot;</code> can have two distinct values: <code>&quot;visible&quot;</code> and <code>&quot;invisible&quot;</code>. We want to map them to <code>true</code> and <code>false</code> respectively. <em>Mapp</em>ing sounds like a job for our already defined <code>fmap</code>. So let’s use it *again.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">visibility = <span class="dt">Decoder</span>.id.map { |output| output == <span class="st">&quot;visible&quot;</span> ? <span class="dv">true</span> : <span class="dv">false</span> }
+
+visibility.run(<span class="st">&quot;visible&quot;</span>) <span class="co"># =&gt; true</span>
+visibility.run(<span class="st">&quot;invisible&quot;</span>) <span class="co"># =&gt; false</span>
+visibility.run(<span class="st">&quot;garbage&quot;</span>) <span class="co"># =&gt; false</span>
+visibility.run(<span class="dv">2</span>) <span class="co"># =&gt; false</span></code></pre></div>
+<p>This works, but it doesn’t read very well and for anything not <code>&quot;visible&quot;</code> or <code>&quot;invisible&quot;</code> it will always return <code>false</code>. Silencing errors like that is usually not a good idea. So, back to the drawing board.</p>
+<p>Looking at the header of this chapter we have <code>OR</code> as our top-level operator and <em>then</em> do some kind of mapping. How would such an <code>a OR b</code> behave? It would probably try to decode <code>a</code> first and if it succeeds return the decoded value. Otherwise it would try decoding <code>b</code> and return that.</p>
+<p>Here’s what <code>OR</code> looks like in code—using <code>|</code> instead of <code>||</code> because <code>||</code> can’t be defined as a method <a href="#fn7" class="footnoteRef" id="fnref7"><sup>7</sup></a>:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">def</span> |(other)
+    <span class="dt">Decoder</span>.new <span class="kw">do</span> |input|
+      <span class="kw">begin</span>
+        <span class="kw">next</span> <span class="dv">self</span>.run(input)
+      <span class="kw">rescue</span> <span class="dt">Failed</span>
+        other.run(input)
+      <span class="kw">end</span>
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+d = integer | <span class="dt">Decoder</span>.id
+d.run(<span class="st">&quot;2&quot;</span>) <span class="co"># =&gt; 2</span>
+d.run(<span class="st">&quot;a&quot;</span>) <span class="co"># =&gt; &quot;a&quot;</span></code></pre></div>
+<p>With <code>Decoder#|</code> defined we need a way to match on <code>&quot;visible&quot;</code> and <code>&quot;invisble&quot;</code>. <code>Decoder.match(&quot;visible&quot;)</code> would look nice, so let’s implement that:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">def</span> <span class="dv">self</span>.match(constant)
+    <span class="dv">self</span>.new <span class="kw">do</span> |input|
+      <span class="kw">if</span> input == constant
+        constant
+      <span class="kw">else</span>
+        raise <span class="dt">Failed</span>, <span class="st">&quot;</span><span class="ot">#{</span>input.inspect<span class="ot">}</span><span class="st"> doesn't match </span><span class="ot">#{</span>constant.inspect<span class="ot">}</span><span class="st">&quot;</span>
+      <span class="kw">end</span>
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="dt">Decoder</span>.match(<span class="st">&quot;foo&quot;</span>).run(<span class="st">&quot;foo&quot;</span>) <span class="co"># =&gt; foo</span>
+<span class="dt">Decoder</span>.match(<span class="st">&quot;foo&quot;</span>).run(<span class="st">&quot;bar&quot;</span>) <span class="co"># =&gt; Decoder::Failed: &quot;bar&quot; doesn't match &quot;foo&quot;</span></code></pre></div>
+<p>Combining <code>match</code>, <code>fmap</code> and <code>|</code> we can now express our mapping from <code>&quot;status&quot;</code> to boolean flags:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">visibility = <span class="dt">Decoder</span>.match(<span class="st">&quot;visible&quot;</span>).fmap { |_| <span class="dv">true</span> } |
+             <span class="dt">Decoder</span>.match(<span class="st">&quot;invisible&quot;</span>).fmap { |_| <span class="dv">false</span> }
+
+visibility.run(<span class="st">&quot;visible&quot;</span>) <span class="co"># =&gt; true</span>
+visibility.run(<span class="st">&quot;invisible&quot;</span>) <span class="co"># =&gt; false</span>
+visibility.run(<span class="st">&quot;foo&quot;</span>) <span class="co"># =&gt; Decoder::Failed: &quot;foo&quot; doesn't match &quot;invisible&quot;</span></code></pre></div>
+<p>Using <code>fmap</code> and ignoring the parameter still feels a bit clunky. We can get rid of that by using <code>Decoder#&gt;</code> which mirrors Haskell’s <a href="http://hackage.haskell.org/package/base-4.12.0.0/docs/Data-Functor.html#v:-36--62-"><code>$&gt;</code></a>:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">def</span> &gt;(constant)
+    fmap { |_| constant }
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+visibility = (<span class="dt">Decoder</span>.match(<span class="st">&quot;visible&quot;</span>) &gt; <span class="dv">true</span>) |
+             (<span class="dt">Decoder</span>.match(<span class="st">&quot;invisible&quot;</span>) &gt; <span class="dv">false</span>)</code></pre></div>
+<h3 id="extracting-values-from-hash-maps-center-23---23">Extracting values from hash maps (<code>{&quot;center&quot; =&gt; 23}</code> -&gt; <code>23</code>)</h3>
+<p>So far we can only decode simple values, but not larger structures like <code>Hash</code> or <code>Array</code>. We have a couple of choices to implement decoding hash maps. Typically this is done through a DSL similar to the following:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">decode_hash(
+  <span class="st">foo: </span>integer,
+  <span class="st">bar: </span>visibility
+)</code></pre></div>
+<p>However, this is too restrictive for our use case since we’re coupling the structure of the input hash map to the structure of the output hash map. This would leave us with some additional data wrangling which we’d like to avoid. So, what’s the alternative? Both Haskell’s <a href="http://hackage.haskell.org/package/aeson-1.4.2.0/docs/Data-Aeson.html#v:.:">aeson</a> and Elm’s <a href="https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Decode#field">Json.Decode</a> define functions which—given a key name—extract just a single value from a hash map. So, we try to do the same:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">def</span> <span class="dv">self</span>.from_key(key, value_decoder)
+    <span class="dv">self</span>.new <span class="kw">do</span> |hash|
+      raise <span class="dt">Failed</span>, <span class="st">&quot;</span><span class="ot">#{</span>hash.inspect<span class="ot">}</span><span class="st"> doesn't contain key </span><span class="ot">#{</span>key.inspect<span class="ot">}</span><span class="st">&quot;</span> <span class="kw">unless</span> hash.has_key?(key)
+
+      value_decoder.run(hash.fetch(key))
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+foo_decoder = <span class="dt">Decoder</span>.from_key(<span class="st">&quot;foo&quot;</span>, integer)
+
+foo_decoder.run({<span class="st">&quot;foo&quot;</span> =&gt; <span class="st">&quot;2&quot;</span>}) <span class="co"># =&gt; 2</span>
+foo_decoder.run({<span class="st">&quot;bar&quot;</span> =&gt; <span class="st">&quot;2&quot;</span>}) <span class="co"># =&gt; Decoder::Failed: {&quot;bar&quot;=&gt;&quot;2&quot;} doesn't contain key &quot;foo&quot;</span></code></pre></div>
+<p>A quick note on symbols vs strings as map keys: <a href="#fn8" class="footnoteRef" id="fnref8"><sup>8</sup></a></p>
+<p>So far so good. We can now try to decode a <code>Point</code> (remember, it was represented as <code>{&quot;x&quot; =&gt; &quot;3&quot;, &quot;y&quot; =&gt; &quot;4&quot;}</code>):</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">x = <span class="dt">Decoder</span>.from_key(<span class="st">&quot;x&quot;</span>, integer)
+y = <span class="dt">Decoder</span>.from_key(<span class="st">&quot;y&quot;</span>, integer)
+
+point = <span class="dt">Point</span>.new <span class="co"># ???</span></code></pre></div>
+<p>Well, we’re stuck. We currently have no way to combine two decoders into one. All we have right now is <code>fmap</code> which takes one decoder and returns a new one. We need some kind of merge to get from <code>x</code>, <code>y</code> to <code>point</code>, though.</p>
+<p>So, what if we take the idea of mapping over a decoder and extend it to two decoders?</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Decoder</span>
+  <span class="kw">def</span> <span class="dv">self</span>.map2(a, b)
+    <span class="dv">self</span>.new <span class="kw">do</span> |input|
+      result_1 = a.run(input)
+      result_2 = b.run(input)
+
+      <span class="kw">yield</span> result_1, result_2
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+point = <span class="dt">Decoder</span>.map2(x, y) { |x, y| <span class="dt">Point</span>.new(x, y) }
+
+point.run({<span class="st">&quot;x&quot;</span> =&gt; <span class="st">&quot;3&quot;</span>, <span class="st">&quot;y&quot;</span> =&gt; <span class="st">&quot;4&quot;</span>}) <span class="co"># =&gt; Point(3, 4)</span></code></pre></div>
+<p>At this point (ha!) we have all ingredients for decoding a <code>Circle</code> and a <code>Rectangle</code>:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">circle =
+  <span class="dt">Decoder</span>.map_n(
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;center&quot;</span>, point),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;radius&quot;</span>, integer),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;color&quot;</span>, color),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;status&quot;</span>, visibility)
+  ) <span class="kw">do</span> |center, radius, color, visibility|
+    <span class="dt">Circle</span>.new(center, radius, color, visibility)
+  <span class="kw">end</span>
+
+rectangle =
+  <span class="dt">Decoder</span>.map_n(
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;topLeft&quot;</span>, point),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;width&quot;</span>, integer),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;height&quot;</span>, integer),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;color&quot;</span>, color),
+    <span class="dt">Decoder</span>.from_key(<span class="st">&quot;status&quot;</span>, visibility)
+  ) <span class="kw">do</span> |top_left, width, height, color, visible|
+    <span class="dt">Rectangle</span>.new(top_left, <span class="dt">Point</span>.new(top_left.x + width, top_left.y + height), color, visible)
+  <span class="kw">end</span></code></pre></div>
+<p><em><code>Decoder.map_n</code> is just a natural extension of <code>map2</code>, <a href="https://github.com/timhabermaas/timhabermaas.github.io/blob/develop/code/decoder.rb#L140">the code</a> is left as an exercise for the reader.</em></p>
+<h3 id="making-decisions">Making decisions</h3>
+<p>TODO</p>
+<h3 id="bonus-functions">Bonus functions</h3>
+<ul>
+<li><code>Decoder.at :: Int -&gt; Decoder a -&gt; Decoder a</code></li>
+<li><code>Decoder.from_key? :: Key -&gt; Decoder a -&gt; Decoder (Maybe a)</code></li>
+<li><code>Decoder.lazy :: (() -&gt; Decoder a) -&gt; Decoder a</code> to decode JSON recursively.</li>
+</ul>
+<h2 id="conclusion">Conclusion</h2>
+<p>TODO</p>
+<ul>
+<li></li>
+</ul>
+<!--
+---
+
+When looking at the [running example](#running-example) the most common use-case
+seems to be to coerce a string to an integer. So, let's start with that.
+
+### The boilerplate
+
+
+#### A note on error handling for coercers
+
+Generally a coercer is a [partial
+function](https://en.wikipedia.org/wiki/Partial_function), meaning for some
+inputs there are no outputs---`"2019-13-51"` is not a valid date for example. In
+order to encode this we generally have three options: (a) raise an exception,
+(b) return `nil` or (c) use a [result
+type](https://en.wikipedia.org/wiki/Result_type). (b) is not an option at all,
+because it will make differentiating between a coerced `nil` and an error
+impossible (think JSON's `null`). We'll use (c) since this is the functional way
+of doing things and result types compose nicer than exceptions. This means our
+coercers will either return `Success` or `Error` [^either].
+
+_Outline:_
+
+* Explain common use-cases
+* What does already exist(?)
+* What is meant by a decoder?
+  * takes a primitive structure and decodes it to a more rich one.
+* Design goals/inspiration by Elm's decoder/parsec
+
+fo
+
+* Which methods return these "primitive" structures?
+  * `JSON.parse`
+  * `params` in Rails (and  oseveral other web libraries)
+  * `CSV.parse`
+
+* What is meant by a decoder?
+* The source input is some combination of `Hash`map, `Array` and `String`. JSON also has Numbers and Booleans, but these only make writing a decoder easier.
+* We're very lucky in Ruby to have all these methods to return roughly the same structure, so we could write on generic library to handle all these use cases.
+
+Except for `dry-schema` all of these take a DSL and configuration heavy
+approach. Inherently there's nothing wrong with this, but k
+
+
+
+Forms submitted through HTTP are stringly typed, meaning integers, booleans,
+dates, etc. are all transmitted as strings. At some point we want to convert these
+string values to the proper types. In Rails this is usually done at the database level:
+Instantiating a new ActiveRecord object auto-magically coerces the values to
+the correct types according to the database schema. This works for the most
+basic use cases, but for anything larger than a toy app we want to have a
+general solution at the HTTP boundary (called "controller" in Rails). Think
+search or report query forms.
+
+There exist several libraries which deal with this problem. For example:
+
+* [dry-types](https://github.com/dry-rb/dry-types)/[dry-validation](https://github.com/dry-rb/dry-validation)
+* [safe_type](https://github.com/chanzuckerberg/safe_type)
+* [coercible](https://github.com/solnic/coercible)
+
+However, a DSL and configuration heavy approach is common among them. This leads
+to some restrictions. For example, it is not possible to change the structure of
+a hash map without resorting to manual data manipulation after coercion.
+
+In this post we want to tackle the same problem (coercing arbitrary
+`params` hash maps to arbitrary Ruby objects [^also-json]) in a more functional, flexible and
+extensible way.
+
+_Disclaimer: Most of the ideas presented here are inspired by a mixture of the Haskell
+and Elm libraries [parsec](http://hackage.haskell.org/package/parsec),
+[Json.Encode](https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Encode)
+and
+[aeson](http://hackage.haskell.org/package/aeson-1.4.1.0/docs/Data-Aeson.html)._
+
+## What is type coercion?
+
+While _type coercion_ is often used in the context of programming languages and
+implicit type conversions (e.g. what Ruby does when interpreting `1.5 + 1`)
+[^wikiconversion], I'm using the term _coercer_ to describe a function which converts any type `a`
+to any type `b`. For example `-> (x) { x == "true" }` would be a coercer
+converting a `String` to a `Boolean`.
+
+
+
+
+## Design Goals
+
+* _Composability_: Coercers should be composable from smaller parts, meaning
+  we can reuse a coercer from `String` to `Date` to build a coercer from
+  `Array of String` to `Array of Date`.
+* _Flexibility_: It should be easy to express more complex coercions like
+  getting from the Hash `{"x" => "2", "y" => "3"}` to the instance `Point.new(2,
+  3)`. Many existing coercion libraries can't express these conversions since
+  their DSLs force a 1-to-1 relationship between source hash map and target hash
+  map onto the user.
+* _Extensibility_: It should be easy for users of the library to define their
+  own coercing rules---preferably by simply combining the provided building
+  blocks.
+
+
+
+TODO: Hier bin ich.
+
+### Converting a string to an integer (`"42" -> 42`)
+
+
+
+Looking at the hash maps in [Running example](#running-example) we foremost need
+a way to convert a `String` to an `Integer`. So, let's define a function to do
+so:
+
+```ruby
+integer = -> (s) {
+  Integer(s)
+}
+
+integer["2"] # => 2
+integer["a"] # => ArgumentError: invalid value for Integer(): "a"
+integer[nil] # => TypeError: can't convert nil into Integer
+```
+
+With both points addressed we end up with the following class:
+
+```ruby
+class Coercer
+  def initialize(&block)
+    @f = block
+  end
+
+  def run(value)
+    @f[value]
+  end
+
+  def self.integer
+    self.new do |s|
+      begin
+        Success.new(Integer(s))
+      rescue TypeError, ArgumentError
+        Error.new("'#{s}' is not an integer")
+      end
+    end
+  end
+end
+
+Coercer.integer.run("2") # => #<Success:0x00007fde11063050 @x=2>
+Coercer.integer.run("a") # => #<Error:0x00007fde1200fd78 @e="'a' is not an integer">
+```
+
+A coercion is a partial function from some value (e.g. `"2018-10-02"`) to some
+other value (e.g. `Date.new(2018, 10, 2)`). The function is partial because a
+coercion doesn't necessarily succeed. For example: `"2018-13-34"` doesn't
+represent a valid date, so it can't be coerced into `Date`.
+
+Therefore we can represent a coercion as a `lambda` returning either an object
+of class `Success` or an error represented by `Error`. Encoding the error case
+using `nil` wouldn't work because we couldn't tell an error and a successful
+coercion resulting in `nil` apart (e.g. JSON's `null` would be represented as
+`nil`).
+
+* They are functions from some type (e.g. `String`) to some other type (e.g.
+  `Date`).
+* A type coercion might either fail or succeed
+
+
+
+Let's start
+
+### Converting a String to an Integer (`"42" -> 42`)
+
+This one's easy:
+
+```ruby
+integer = -> (s) {
+  begin
+    Success.new(Integer(s))
+  rescue TypeError, ArgumentError
+    Error.new("'#{s}' is not an integer")
+  end
+}
+
+integer["42"] # => 42
+```
+
+Once we've wrapped everything in a class and took care of the sad path
+[^no-to-i]. After we've wrapped the
+
+function in a lambda and in a class `Coercer`---we might
+
+```ruby
+  43 + 2
+```
+
+### Converting a value (`"red" -> "RED"`)
+
+### Getting a value out of a hash map (`{"x" => "42"} -> 42`)
+
+### Alternatives (`||` or `|`)
+
+TODO: is `||` left/right associative?
+
+```ruby
+
+```
+
+-->
+<div class="footnotes">
+<hr />
+<ol>
+<li id="fn1"><p>TODO: Remove this paragraph? What’s the purpose?<a href="#fnref1">↩</a></p></li>
+<li id="fn2"><p>One might argue that a dynamically typed language like Ruby has less use for explicit decoders because of duck typing. But I’d argue otherwise: It’s especially important to get the type conversion right, because there’s no assistance from a type system in case you mess up.<a href="#fnref2">↩</a></p></li>
+<li id="fn3"><p>Yes, this is a real-world example from integrating with an external system. Shit’s gonna hit the fan in ~981 years.<a href="#fnref3">↩</a></p></li>
+<li id="fn4"><ul>
+<li><a href="https://github.com/chanzuckerberg/safe_type">safe_type</a></li>
+<li><a href="https://github.com/dry-rb/dry-types">dry-types</a> / <a href="https://github.com/dry-rb/dry-validation">dry-validation</a></li>
+<li><a href="https://github.com/solnic/coercible">coercible</a></li>
+<li><a href="https://github.com/nicolasblanco/rails_param">rails_param</a></li>
+</ul>
+<a href="#fnref4">↩</a></li>
+<li id="fn5"><p>A result type and a decoder have roughly the same API, so many methods will simply delegate to result.<a href="#fnref5">↩</a></p></li>
+<li id="fn6"><p>The name comes from the <code>Functor</code> typeclass in Haskell: <a href="https://wiki.haskell.org/Functor" class="uri">https://wiki.haskell.org/Functor</a>. They avoided calling it <code>map</code> because <code>map</code> leads to better error message for beginners (<a href="https://wiki.haskell.org/Typeclassopedia#Instances">source</a>).<a href="#fnref6">↩</a></p></li>
+<li id="fn7"><p><a href="http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions">Built-in operators in Ruby</a><a href="#fnref7">↩</a></p></li>
+<li id="fn8"><p>In case you need to decode a hash map which uses either symbols or strings as keys and you don’t know which it is, you simply could define a new decoder which takes care of both:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> from_key_indifferent(sym_or_string, decoder)
+  from_key(sym_or_string.to_s, decoder) || from_key(sym_or_string.to_sym, decoder)
+<span class="kw">end</span></code></pre></div>
+<a href="#fnref8">↩</a></li>
+</ol>
+</div>
+
+            </article>
+          </div>
+        </main>
+      </div>
+    </body>
+</html>

@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>2017-10-16-haskell-ruby-parser-combinator &middot Tim Habermaas</title>
+        <link rel="stylesheet" type="text/css" href="../css/site.css" />
+        <link rel="stylesheet" type="text/css" href="../css/syntax.css" />
+    </head>
+    <body>
+      <div class="container content">
+        <header class="masthead masthead-title">
+          <h3>
+            <a href="../">f = -> (x) { x }</a>
+          </h3>
+          &nbsp;&nbsp;&nbsp;&nbsp;
+          <small>
+            <a href="../">Posts</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../about.html">About</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../contact.html">Contact</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../pgp.html">PGP Key</a>
+          </small>
+        </header>
+        <main>
+          <div class="posts">
+            <article class="post">
+              <h1 class="post-title">
+                2017-10-16-haskell-ruby-parser-combinator
+              </h1>
+
+              <time datetime="2017-10-16T00:00:00" class="post-date">October 16, 2017</time>
+
+<p>TODO:</p>
+<ul>
+<li><h2 id="for-context-dependent-parsing-you-could-show-something-like-version-3-which-changes-the-way-the-rest-of-the-object-is-understood.">For context dependent parsing you could show something like <code>version: 3</code> which changes the way the rest of the object is understood.</h2>
+<h2 id="title-haskell---ruby-parser-combinator">title: “Haskell -&gt; Ruby: Parser Combinator”</h2></li>
+</ul>
+<p><em>In this blog post I go through the process of implementing a parser combinator in Ruby. I will use Haskell’s <a href="https://hackage.haskell.org/package/parsec">parsec</a> library and the original <a href="https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/parsec-paper-letter.pdf">paper</a> as basis for the implementation, but will not follow them by the letter since enhancements like good error reporting and streaming only distract from the core idea of parser combinators.</em></p>
+<h2 id="what-is-a-parser">What is a parser?</h2>
+<p>According to <a href="https://en.wikipedia.org/wiki/Parsing#Computer_languages">Wikipedia</a> a parser is</p>
+<blockquote>
+<p>a software component that takes input data (frequently text) and builds a data structure – often some kind of parse tree, abstract syntax tree or other hierarchical structure</p>
+</blockquote>
+<p>So, roughly speaking a parser is a function from <code>String</code> to any object. Written using Haskell’s syntax<a href="#fn1" class="footnoteRef" id="fnref1"><sup>1</sup></a>:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">parse ::</span> <span class="dt">String</span> <span class="ot">-&gt;</span> a</code></pre></div>
+<p>As an example the following function converts the strings <code>&quot;true&quot;</code> and <code>&quot;false&quot;</code> to their respective boolean values:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> parse_boolean(text)
+  <span class="kw">if</span> text.start_with? <span class="st">&quot;true&quot;</span>
+    <span class="dv">true</span>
+  <span class="kw">elsif</span> text.start_with? <span class="st">&quot;false&quot;</span>
+    <span class="dv">false</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+parse_boolean(<span class="st">&quot;false&quot;</span>) <span class="co"># =&gt; false</span>
+parse_boolean(<span class="st">&quot;true&quot;</span>)  <span class="co"># =&gt; true</span></code></pre></div>
+<p>So <code>parse_boolean :: String -&gt; Boolean</code> is a parser.</p>
+<h2 id="the-combinator-part">The ‘combinator’ part</h2>
+<p>The basic idea behind parser combinators is to assemble small and simple parsers into large and more complex ones. For example we can try to parse <code>&quot;truefalse&quot;</code> into the array <code>[true, false]</code> while reusing the existing definition of <code>parse_boolean</code>:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> parse_two_booleans(text)
+  first = parse_boolean(text)
+  second <span class="kw">= if</span> first
+    parse_boolean(text[<span class="dv">4</span>..-<span class="dv">1</span>]) <span class="co"># Magic numbers, yay! \o/</span>
+  <span class="kw">else</span>
+    parse_boolean(text[<span class="dv">5</span>..-<span class="dv">1</span>])
+  <span class="kw">end</span>
+  [first, second]
+<span class="kw">end</span></code></pre></div>
+<p>As you can see we need knowledge of the implementation of <code>parse_boolean</code> and if we ever decide to represent <code>true</code> by <code>&quot;yes&quot;</code> our code will break. This is not ideal. So, lets look at the actual (simplified) definition of parser combinators in Haskell:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">type</span> <span class="dt">Parser</span> a <span class="fu">=</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (a, <span class="dt">String</span>)</code></pre></div>
+<p>There are two differences to our naive implementation: <strong>a)</strong> A parser can fail (represented by <code>Maybe</code> <a href="#fn2" class="footnoteRef" id="fnref2"><sup>2</sup></a>) and <strong>b)</strong> in case a parse succeeds the parser consumes its input and returns the remaining string. This is what enables us to compose parsers in a nicer way.</p>
+<h3 id="representing-failure">Representing failure</h3>
+<p>Since there’s no <code>Maybe</code> type in Ruby <a href="#fn3" class="footnoteRef" id="fnref3"><sup>3</sup></a> we’re left with returning <code>nil</code> or raising an exception if a parser fails. Returning <code>nil</code> would be a terrible choice since we wouldn’t be able to tell a parser returning <code>nil</code> (e.g. when parsing JSON’s <code>null</code>) and a failed parse apart—<code>Hash#[]</code> and <code>Array#[]</code> suffer from the same problem. Therefore let’s raise a <code>ParseError</code> if we can’t parse a string successfully.</p>
+<h3 id="updated-implementation">Updated implementation</h3>
+<p>When taking <em>failures</em> and <em>consuming input</em> into account <code>parse_boolean</code> now looks like this:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> parse_boolean(text)
+  <span class="kw">if</span> text.start_with? <span class="st">&quot;true&quot;</span>
+    [<span class="dv">true</span>, text[<span class="dv">4</span>..-<span class="dv">1</span>]]
+  <span class="kw">elsif</span> text.start_with? <span class="st">&quot;false&quot;</span>
+    [<span class="dv">false</span>, text[<span class="dv">5</span>..-<span class="dv">1</span>]]
+  <span class="kw">else</span>
+    raise <span class="dt">ParseError</span>.new(<span class="st">&quot;'</span><span class="ot">#{</span>text<span class="ot">}</span><span class="st">' starts with neither 'true' nor 'false'&quot;</span>)
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+parse_boolean(<span class="st">&quot;true rest&quot;</span>)  <span class="co"># =&gt; [true, &quot; rest&quot;]</span>
+parse_boolean(<span class="st">&quot;false rest&quot;</span>) <span class="co"># =&gt; [false, &quot; rest&quot;]</span>
+parse_boolean(<span class="st">&quot;foo rest&quot;</span>)   <span class="co"># =&gt; ParseError: 'foo rest' starts with neither 'true' nor 'false'</span></code></pre></div>
+<p>By returning the remaining string composing became much nicer:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> parse_two_booleans(text)
+  first, rest = parse_boolean(text)
+  second, rest = parse_boolean(rest)
+  [[first, second], rest]
+<span class="kw">end</span>
+
+parse_two_booleans(<span class="st">&quot;truefalsetrue&quot;</span>) <span class="co"># =&gt; [[true, false], &quot;true&quot;]</span></code></pre></div>
+<h2 id="basic-building-blocks">Basic building blocks</h2>
+<p>There’s still quite a lot going on in <code>parse_boolean</code>: At the top-level there’s the choice between <code>&quot;true&quot;</code> and <code>&quot;false&quot;</code> and each branch consumes several characters at once. Can we split <code>parse_boolean</code> into smaller parsers? And if so what is the smallest set of parsers we need?</p>
+<p>It turns out we only need to define the parser <code>satisfy :: (Char -&gt; Bool) -&gt; Parser Char</code> and can create every other parser by extending/combining <code>satisfy</code>. <code>satisfy</code> takes a property (<code>Char -&gt; Bool</code>) and consumes exactly one character, checking whether the property holds for that character.</p>
+<p>The following code provides one possible implementation of <code>satisfy</code>. I’ve also created a new class <code>Parser</code> serving as a counterpart of Haskell’s <code>newtype</code>, because we need to add custom methods to a parser later on. <code>Parser</code> currently just wraps a lambda.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Parser</span>
+  <span class="kw">def</span> initialize(&amp;block)
+    <span class="ot">@p</span> = block
+  <span class="kw">end</span>
+
+  <span class="kw">def</span> parse(text)
+    <span class="ot">@p</span>.call text
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="kw">def</span> satisfy
+  <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+    <span class="kw">if</span> <span class="kw">yield</span> text[<span class="dv">0</span>]
+      [text[<span class="dv">0</span>], text[<span class="dv">1</span>..-<span class="dv">1</span>]]
+    <span class="kw">else</span>
+      raise <span class="dt">ParseError</span>.new(<span class="st">&quot;'</span><span class="ot">#{</span>text[<span class="dv">0</span>]<span class="ot">}</span><span class="st">' doesn't satisfy property&quot;</span>)
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+satisfy { |t| t == <span class="st">&quot;a&quot;</span> }.parse(<span class="st">&quot;a&quot;</span>) <span class="co"># =&gt; [&quot;a&quot;, &quot;&quot;]</span>
+satisfy { |t| t == <span class="st">&quot;a&quot;</span> }.parse(<span class="st">&quot;b&quot;</span>) <span class="co"># =&gt; ParseError: 'b' doesn't satisfy property</span></code></pre></div>
+<p>While theoretically <code>satisfy</code> and higher level combinators are sufficient to express any parser, I also define <code>string</code> because implementing it in terms of <code>satisfy</code> would require some combinators I’d like to introduce with the help of <code>string</code> (otherwise leading to a classic chicken-egg-problem):</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> string(s)
+  <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+    <span class="kw">if</span> text.start_with? s
+      [s, text[s.size..-<span class="dv">1</span>]]
+    <span class="kw">else</span>
+      raise <span class="dt">ParseError</span>.new(<span class="st">&quot;couldn't match '</span><span class="ot">#{</span>s<span class="ot">}</span><span class="st">'&quot;</span>)
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<p>With <code>satisfy</code> defined we can now create a few convenient parsers:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> char(c)
+  satisfy { |token| token == c }
+<span class="kw">end</span>
+
+<span class="kw">def</span> any_char
+  satisfy { |_| <span class="dv">true</span> }
+<span class="kw">end</span>
+
+<span class="kw">def</span> one_of(list_or_range)
+  satisfy { |token| list_or_range.include? token }
+<span class="kw">end</span>
+
+digit  = one_of (<span class="dv">0</span>..<span class="dv">9</span>).map(&amp;<span class="st">:to_s</span>)
+letter = one_of((<span class="st">&quot;a&quot;</span>..<span class="st">&quot;z&quot;</span>).to_a + (<span class="st">&quot;A&quot;</span>..<span class="st">&quot;Z&quot;</span>).to_a)
+space  = char <span class="st">&quot; &quot;</span></code></pre></div>
+<h2 id="combinators">Combinators</h2>
+<p>Combinators can also be thought of as higher-level parsers, meaning they take a parser as input and create a new one. So, in some sense they can be compared to meta programming.</p>
+<h3 id="apply-a-parser-multiple-times">Apply a parser multiple times</h3>
+<p>TODO: Explain the code better. In order to parse a number in TOML we need to apply <code>digit</code> to our input until there are no digits left.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> many1(p)
+  <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+    result, rest = p.parse(text)
+    tokens = [result]
+    loop <span class="kw">do</span>
+      result, rest = p.parse(rest)
+      tokens &lt;&lt; result
+    <span class="kw">end</span>
+    [tokens, rest]
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+digits = many1(digit)
+digits.parse(<span class="st">&quot;123 rest&quot;</span>) <span class="co"># =&gt; [[&quot;1&quot;, &quot;2&quot;, &quot;3&quot;], &quot; rest&quot;]</span></code></pre></div>
+<p>However <code>digits</code> returns <code>[&quot;1&quot;, &quot;2&quot;, &quot;3&quot;]</code> which isn’t very nice to work with. We’d like to get the integer <code>123</code> back. So, it would be nice to change the return value of a parser without changing the parser itself. This leads us to the next combinator:</p>
+<h3 id="changing-results-aka-functor">Changing results (aka <a href="https://hackage.haskell.org/package/base-4.10.0.0/docs/Data-Functor.html#t:Functor">Functor</a>)</h3>
+<p>In Ruby we’re already used to calling <code>map</code> in order to apply a function to all elements of an array. If we think of a parser as a black box returning either one element (<code>[x]</code>, success) or zero elements (<code>[]</code>, parse error), calling <code>map</code> feels like a natural way to change the parser’s result. In fact, Haskell already has a concept for objects which can be mapped over called a <a href="https://wiki.haskell.org/Functor">Functor</a>. Due to historical reasons <code>map</code> is called <code>fmap :: (a -&gt; b) -&gt; f a -&gt; f b</code> in Haskell, though. While the name <code>map</code> would be nicer, I’ll go with <code>fmap</code> as well in order to avoid confusion with <code>Array#[]</code>. Assuming we’ve already implemented <code>fmap</code> we should be able to write the following code to get integer values when parsing digits:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">integer = digits.fmap { |list| list.join.to_i }
+<span class="co"># Or equivalent:</span>
+<span class="co"># integer = digits.fmap(&amp;:join).fmap(&amp;:to_i)</span>
+integer.parse(<span class="st">&quot;123 rest&quot;</span>) <span class="co"># =&gt; [123, &quot; rest&quot;]</span></code></pre></div>
+<p>The implementation of <code>fmap</code> is pretty straightforward. We build a new parser which calls the original parser (<code>self</code>) and <code>yield</code>s the result to the block. The remaining string remains unchanged:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Parser</span>
+  <span class="kw">def</span> fmap
+    <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+      result, rest = <span class="dv">self</span>.parse(text)
+      [<span class="kw">yield</span> result, rest]
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<p>With <code>string</code> and <code>fmap</code> in place we can also simplify our boolean parsers:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">true_parser = string(<span class="st">&quot;true&quot;</span>).fmap { |_| <span class="dv">true</span> }
+false_parser = string(<span class="st">&quot;false&quot;</span>).fmap { |_| <span class="dv">false</span> }</code></pre></div>
+<p>We notice that we don’t even need <code>fmap</code>’s block parameter. It would be nice to have a more concise syntax for these cases were the block is just a constant function. So, lets steal from Haskell again. In the <a href="https://hackage.haskell.org/package/base-4.10.0.0/docs/Data-Functor.html"><code>Data.Functor</code></a> module there are several functions defined in terms of <code>fmap</code>. Two of them are <a href="https://hackage.haskell.org/package/base-4.10.0.0/docs/Data-Functor.html#v:-36--62-"><code>$&gt; :: f a -&gt; b -&gt; f b</code></a> and <a href="https://hackage.haskell.org/package/base-4.10.0.0/docs/Data-Functor.html#v:-60--36-"><code>&lt;$ :: b -&gt; f a -&gt; f b</code></a>. Both of them take a functor and some value and return a new functor with the <em>return value</em> replaced. Unfortunately we can’t copy the functions verbatim because Ruby doesn’t allow defining arbitrary operators. We could overload <code>&gt;</code> though:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Parser</span>
+  <span class="kw">def</span> &gt;(constant)
+    <span class="dv">self</span>.fmap { |_| constant }
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">true_parser = string(<span class="st">&quot;true&quot;</span>) &gt; <span class="dv">true</span>
+false_parser = string(<span class="st">&quot;false&quot;</span>) &gt; <span class="dv">false</span></code></pre></div>
+<p>That’s nicer and we’re very close to rewriting <code>parse_boolean</code> in terms of <code>true_parser</code> and <code>false_parser</code>. However, we still need a way to express branching (like we did with <code>if/elsif</code> earlier). This leads us to:</p>
+<h3 id="choice-aka-alternative">Choice (aka <a href="https://hackage.haskell.org/package/base-4.10.0.0/docs/Control-Applicative.html#t:Alternative">Alternative</a>)</h3>
+<p>Haskell: <code>&lt;|&gt; :: f a -&gt; f a -&gt; f a</code></p>
+<ul>
+<li>same types, but restriction doesn’t exist in Ruby? Does this break any laws?</li>
+<li>What about the identity? Do we need it?</li>
+</ul>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">boolean_parser = true_parser | false_parser</code></pre></div>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Parser</span>
+  <span class="kw">def</span> |(other)
+    <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+      <span class="kw">begin</span>
+        <span class="dv">self</span>.parse(text)
+      <span class="kw">rescue</span> <span class="dt">ParseError</span>
+        other.parse(text)
+      <span class="kw">end</span>
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<h3 id="lifting-a-function-aka-applicative-functor">Lifting a function (aka <a href>Applicative Functor</a>)</h3>
+<h3 id="sequencing">Sequencing</h3>
+<h3 id="backtracking">Backtracking</h3>
+<p>Introduce <code>try</code></p>
+<p>Date vs. Integer (1992-12-32 vs 21</p>
+<h2 id="final-parser">Final parser</h2>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">alphaNum = letter | digit
+key = many1(alphaNum).fmap(&amp;<span class="st">:join</span>)
+string = char(<span class="st">'&quot;'</span>) &gt; many(<span class="kw">not</span>(char(<span class="st">'&quot;'</span>))) &lt; char(<span class="st">'&quot;'</span>)
+year = digit.count(<span class="dv">4</span>).fmap(&amp;<span class="st">:join</span>).fmap(&amp;<span class="st">:to_i</span>)
+month = digit.count(<span class="dv">2</span>).fmap(&amp;<span class="st">:join</span>).fmap(&amp;<span class="st">:to_i</span>)
+day = digit.count(<span class="dv">2</span>).fmap(&amp;<span class="st">:join</span>).fmap(&amp;<span class="st">:to_i</span>)
+date = <span class="dt">Parser</span>.lift(year, month, day) { |y, m, d| <span class="dt">Date</span>.new(y, m, d) }
+boolean = (string(<span class="st">&quot;true&quot;</span>) &gt; <span class="dv">true</span>) | (string(<span class="st">&quot;false&quot;</span>) &gt; <span class="dv">false</span>)
+integer = many1(digit).fmap(&amp;<span class="st">:join</span>).to_i
+value = date | integer | string | boolean
+line = <span class="dt">Parser</span>.lift(key, string(<span class="st">&quot; = &quot;</span>), value) { |k, _, v| {k =&gt; v} }
+<span class="co"># TODO: use line.sepEndBy(newline)</span>
+lines = many(line &lt; newline).fmap { |lines| lines.reduce({}) { |acc, h| acc.merge(h) } }</code></pre></div>
+<h2 id="concrete-use-case">Concrete use-case</h2>
+<p>In order to have something concrete to work with we’re trying to build a parser for a subset of <a href="https://en.wikipedia.org/wiki/TOML">TOML</a>. Our parser will have (at least) the following restrictions:</p>
+<ul>
+<li>no nested arrays</li>
+<li>no tables</li>
+<li>no floats</li>
+<li>only dates, no datetimes</li>
+<li>very strict whitespace parsing</li>
+</ul>
+<p>Here’s a valid document which we will be able to successfully parse at the end:</p>
+<pre class="toml"><code>name = &quot;Tom Preston-Werner&quot;
+dob = 1979-05-27
+height = 182
+married = true</code></pre>
+<p><code>parse_toml(s)</code> should yield the following Ruby object:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">{
+  <span class="st">name: &quot;Tom Preston-Werner&quot;</span>,
+  <span class="st">dob: </span><span class="dt">Date</span>.new(<span class="dv">1979</span>, <span class="dv">5</span>, <span class="dv">27</span>),
+  <span class="st">height: </span><span class="dv">182</span>,
+  <span class="st">married: </span><span class="dv">true</span>
+}</code></pre></div>
+<h2 id="what-about-the-combinator-part">What about the ‘combinator’ part?</h2>
+<p>While writing single ad-hoc parsers is fine for small grammars, you probably want to have more sophisticated methods available once you start writing more complex parsers (e.g. for TOML). That’s where the <em>combinator</em> part comes into play. The idea is to combine small simple parsers into more complex ones.</p>
+<h3 id="basic-building-blocks-1">Basic building blocks</h3>
+<p>In order to combine simple parsers into more complex ones we need to define simple parsers first. The simplest parser is propably the one parsing one character:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">any_char = <span class="dt">Parser</span>.new { |text| [text[<span class="dv">0</span>]] }</code></pre></div>
+<p>We also need a way to check for specific characters, though. For example <code>=</code> is used as the delimiter between key/value pairs in TOML. Therefore lets define a helper function which creates a parser expecting a particular character:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> char(c)
+  <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+    <span class="kw">if</span> text[<span class="dv">0</span>] == c
+      [c]
+    <span class="kw">else</span>
+      []
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+char(<span class="st">&quot;:&quot;</span>).parse(<span class="st">&quot;:&quot;</span>) <span class="co"># =&gt; [&quot;:&quot;]</span>
+char(<span class="st">&quot;:&quot;</span>).parse(<span class="st">&quot;x&quot;</span>) <span class="co"># =&gt; []</span></code></pre></div>
+<h1 id="section"></h1>
+<h3 id="combinators-1">Combinators</h3>
+<p>If we want to parse the ASCII arrow <code>&quot;-&gt;&quot;</code> we would need a way to write a parser expecting a dash followed by a greater than sign: <code>char(&quot;-&quot;) + char(&quot;&gt;&quot;)</code></p>
+<p>The implementation of <code>+</code> would need to run the first parser and in case it succeeded run the second parser. If we start implementing <code>+</code> for <code>Parser</code> we might end up with something like this:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">class</span> <span class="dt">Parser</span>
+  <span class="kw">def</span> +(other)
+    <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+      first_result = <span class="dv">self</span>.parse(text)
+      <span class="kw">next</span> [] <span class="kw">if</span> first_result.empty?
+      second_result = other.parse(text[<span class="dv">1</span>..-<span class="dv">1</span>])
+      <span class="kw">next</span> [] <span class="kw">if</span> second_result.empty?
+      [first_result.first + second_result.first]
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<p>This code has two problems though: <em>a)</em> It assumes that the first parser only consumes one character and <em>b)</em> it assumes that the results of the parsers are of type <code>String</code> and can therefore be safely combined using <code>String#+</code>. Both of these assumptions don’t necessarily hold: you could create a parser which parsers several characters and returns an integer, just like <code>int_parser</code> did earlier.</p>
+<p>While <em>a)</em> could be solved by counting the characters returned from the first parser, it will still break when the returned values are not strings. Therefore we need a more generic solution to combine two parsers.</p>
+<p>Lets solve <em>a)</em> first: If we not only return the parsed values from a parser, but also the remaining string we wouldn’t need to count any characters or depend on other hacks to figure out how many characters the previous parser looked at. So, we change our definitions of <code>any_char</code> and <code>char</code> accordingly:</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">any_char = <span class="dt">Parser</span>.new { |text| [text[<span class="dv">0</span>], text[<span class="dv">1</span>..-<span class="dv">1</span>]] }
+
+<span class="kw">def</span> char(c)
+  <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+    <span class="kw">if</span> text[<span class="dv">0</span>] == c
+      [c, text[<span class="dv">1</span>..-<span class="dv">1</span>]]
+    <span class="kw">else</span>
+      []
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<p>We could now implement <code>+</code>, and feed the remaining string of the first parser to the second. However, we’d still have to hardcode the way we want to combine the two results.</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"><span class="kw">def</span> combine(a, b)
+  <span class="dt">Parser</span>.new <span class="kw">do</span> |text|
+    first = a.parse(text)
+    <span class="kw">next</span> [] <span class="kw">if</span> first.empty?
+    first_result, remaining = first
+    second = b.parse(remaining)
+    <span class="kw">next</span> [] <span class="kw">if</span> second.empty?
+    second_result, remaining = second
+    [<span class="kw">yield</span> first_result, second_result, remaining]
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre></div>
+<h2 id="parsing-toml">Parsing “TOML”</h2>
+<div class="footnotes">
+<hr />
+<ol>
+<li id="fn1"><p>I’m using Haskell’s type signature throughout this post because it is concise and, in my opinion, readable for anyone vaguely familar with static types. There’s also no standard way to express type signatures in Ruby that I’m aware of.<a href="#fnref1">↩</a></p></li>
+<li id="fn2"><p>See the paper <a href="http://www.cs.tufts.edu/~nr/cs257/archive/mike-spivey/maybe-not-enough.pdf">When Maybe is not good enough</a> for when you would need a more sophisticated aproach than a simple <code>Maybe</code>.<a href="#fnref2">↩</a></p></li>
+<li id="fn3"><p>Of course we could port <code>Maybe</code> to Ruby and that’s probably what I’d do in a serious implementation, but I wanted to keep the focus on parser combinators and not introduce another concept.<a href="#fnref3">↩</a></p></li>
+</ol>
+</div>
+
+            </article>
+          </div>
+        </main>
+      </div>
+    </body>
+</html>

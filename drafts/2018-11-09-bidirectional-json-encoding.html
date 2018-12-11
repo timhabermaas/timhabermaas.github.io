@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Bidirectional JSON parsing in Ruby &middot Tim Habermaas</title>
+        <link rel="stylesheet" type="text/css" href="../css/site.css" />
+        <link rel="stylesheet" type="text/css" href="../css/syntax.css" />
+    </head>
+    <body>
+      <div class="container content">
+        <header class="masthead masthead-title">
+          <h3>
+            <a href="../">f = -> (x) { x }</a>
+          </h3>
+          &nbsp;&nbsp;&nbsp;&nbsp;
+          <small>
+            <a href="../">Posts</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../about.html">About</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../contact.html">Contact</a>
+          </small>
+          &nbsp;
+          <small>
+            <a href="../pgp.html">PGP Key</a>
+          </small>
+        </header>
+        <main>
+          <div class="posts">
+            <article class="post">
+              <h1 class="post-title">
+                Bidirectional JSON parsing in Ruby
+              </h1>
+
+              <time datetime="2018-11-09T00:00:00" class="post-date">November  9, 2018</time>
+
+<p>In this blog post I want</p>
+<h2 id="motivation">Motivation</h2>
+<p>Usually <code>to_json</code>/<code>as_json</code> and some ad-hoc parsing like <code>json[:date] = Date.parse(json[:date])</code></p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">J.object(
+  J.prop(<span class="st">'foo'</span>, J.int),
+  J.prop(<span class="st">'bar'</span>, J.string)
+)</code></pre></div>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby">J.array(J.string)</code></pre></div>
+<ul>
+<li>Prisms for the rescue</li>
+<li>The problem with choice</li>
+</ul>
+<h2 id="the-problem-with-choice">The problem with choice</h2>
+<p>Often the conversion of values is not as straightforward as parsing a string as a date. straightforward as parsing a string as a date</p>
+<p>Example: Infinity &lt;-&gt; “31.12.2999”</p>
+<div class="sourceCode"><pre class="sourceCode ruby"><code class="sourceCode ruby"></code></pre></div>
+
+            </article>
+          </div>
+        </main>
+      </div>
+    </body>
+</html>
