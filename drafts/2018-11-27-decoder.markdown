@@ -90,6 +90,8 @@ possible decodings and how the class can be constructed---or only return a
 hash map as a result---meaning there has to be a 1-to-1 relationship between
 input hash keys and output hash keys.
 
+We want to avoid these issues.
+
 ## Running example
 
 Let's assume we're tasked to decode the following hash maps to their
@@ -153,14 +155,27 @@ Let's start with the most simple decoder: The
 [identity](https://en.wikipedia.org/wiki/Identity_function) decoder which
 just returns its input.
 
-Since a decoder is a partial function we can use a `lambda` to represent it
-and take care of the partiality by using a result/either type [^either]. The
-`Err` values represent failed decodings and include an error message and the
-`Ok` values represent successful decodings.
+#### How to represent partial functions
+
+Since a decoder is a just a partial function we can use a `lambda` to
+represent it. Yey, taking care of the partiality isn't as straightforward. We
+basically have three options for indicating a failed decoder:
+
+1. Return `nil`
+2. Return an result/either type
+3. Raise an exception
+
+_1._ won't work since we wouldn't be able to distinguish a successful decode
+with the result of `nil` (think decoding JSON's `null`) from an error. _2._
+is my preferred approach, because result values can be easier composed than
+exceptions. However, using `Ok`/`Err` will make it harder to follow this blog
+post and the implementation of some methods will become trivial.[^trivial-implementation] Therefore I'll use exceptions to indicate an
+unsuccessful conversion. For the result type version see the [linked
+code](https://github.com/timhabermaas/timhabermaas.github.io/blob/develop/code/decoder.rb).
 
 ```ruby
-id_decoder = -> (input) { Ok(input) }
-id_decoder["23"] # => "Ok(23)"
+id_decoder = -> (input) { input }
+id_decoder["23"] # => "23"
 ```
 
 Composing different decoders will require us to define methods on a decoder,
@@ -168,6 +183,8 @@ so let's wrap that lambda in a class so we don't need to monkey patch `Proc`.
 
 ```ruby
 class Decoder
+  class Failed < StandardError; end
+
   def initialize(&block)
     @f = block
   end
@@ -178,7 +195,7 @@ class Decoder
 
   def self.id
     new do |input|
-      Ok(input)
+      input
     end
   end
 end
@@ -192,23 +209,23 @@ the first real problem: Getting from a string to an integer.
 ### String to integer (`"42" -> 42`)
 
 We'll use `Integer` for strict conversion from strings to integers. `to_i`
-just returns `0` when giving invalid input. That's usually not what we want.
+just returns `0` when given invalid input. That's usually not what we want.
 
 ```ruby
 integer = Decoder.new do |input|
   begin
-    Ok(Integer(input))
+    Integer(input) # Integer(nil) raises a TypeError
   rescue TypeError, ArgumentError
-    Err("'#{input.inspect}' is not an integer")
+    raise Decoder::Failed, "'#{input.inspect}' is not an integer"
   end
 end
 
-integer.run("123") # => Ok(123)
+integer.run("123") # => 123
+integer.run("a123") # => Decoder::Failed: '"a123"' is not an integer
 ```
 
-The code should be pretty straighforward: On every input which is not
-convertable to a number we return an error (`Integer(nil)` returns a
-`TypeError`).
+The code should be pretty straightforward: On every input which is not
+convertible to a number we raise an exception.
 
 ### Converting a string to uppercase (`"red"` -> `"RED"`)
 
@@ -225,16 +242,16 @@ the decoded value. So, let's add a way to do so to `Decoder`:
 
 ```ruby
 class Decoder
-  def fmap(&block)
+  def fmap
     Decoder.new do |input|
-      run(input).fmap(&block)
+      yield run(input)
     end
   end
 end
 ```
 
-`fmap` first runs the input through the decoder and afterwards passes the
-value into the provided block.
+`fmap` first runs the decoder with the provided input and afterwards yields
+to the prodived block.
 `Decoder#fmap` is very similar to `Array#map` in that it "maps" a function
 over the element(s). However, I chose to not call it `map` [^fmap] to make it less
 confusing when reading code which deals with decoders and arrays at the same
@@ -247,7 +264,7 @@ color = Decoder.id.fmap { |output| output.upcase }
 # or shorter
 color = Decoder.id.fmap(&:upcase)
 
-color.run("red") # => Ok("RED")
+color.run("red") # => "RED"
 ```
 
 We're almost finished converting the values of `p1` or `p2`, the only thing
@@ -255,16 +272,18 @@ left is the `"status"` key and its possible values.
 
 ### Alternatives (`"visible"` -> `true` OR `"invisible"` -> `false`)
 
-`"status"` can have two distinct values: `"visible"` and `"invisible"`. We want to map them to `true` and `false` respectively.
-*Mapp*ing sounds like a job for our already defined `fmap`. So let's use it again.
+`"status"` can have two distinct values: `"visible"` and `"invisible"`. We
+want to map them to `true` and `false` respectively. *Mapp*ing sounds like a
+job for our already defined `fmap`. So let's use it
+*again.
 
 ```ruby
 visibility = Decoder.id.map { |output| output == "visible" ? true : false }
 
-visibility.run("visible") # => Ok(true)
-visibility.run("invisible") # => Ok(false)
-visibility.run("garbage") # => Ok(false)
-visibility.run(2) # => Ok(false)
+visibility.run("visible") # => true
+visibility.run("invisible") # => false
+visibility.run("garbage") # => false
+visibility.run(2) # => false
 ```
 
 This works, but it doesn't read very well and for anything not `"visible"` or
@@ -274,29 +293,26 @@ usually not a good idea. So, back to the drawing board.
 Looking at the header of this chapter we have `OR` as our top-level operator
 and _then_ do some kind of mapping. How would such an `a OR b` behave? It
 would probably try to decode `a` first and if it succeeds return the decoded
-value. Otherwise `OR` would try decoding `b` and return that.
+value. Otherwise it would try decoding `b` and return that.
 
-Here's what `OR` would look like in code---using `|` instead of `||` because `||` can't be defined as a method [^or-method]:
+Here's what `OR` looks like in code---using `|` instead of `||` because `||` can't be defined as a method [^or-method]:
 
 ```ruby
 class Decoder
   def |(other)
     Decoder.new do |input|
-      self.run(input) | other.run(input)
+      begin
+        next self.run(input)
+      rescue Failed
+        other.run(input)
+      end
     end
   end
 end
 
 d = integer | Decoder.id
-d.run("2") # => Ok(2)
-d.run("a") # => Ok("a")
-```
-
-with `|` on `Result` being defined as:
-
-```ruby
-Ok(a)  | _ = Ok(a)
-Err(a) | b = b
+d.run("2") # => 2
+d.run("a") # => "a"
 ```
 
 With `Decoder#|` defined we need a way to match on `"visible"` and
@@ -306,30 +322,31 @@ that:
 ```ruby
 class Decoder
   def self.match(constant)
-    self.new do |s|
-      if s == constant
-        Ok(s)
+    self.new do |input|
+      if input == constant
+        constant
       else
-        Err("'#{s}' doesn't match '#{constant}'")
+        raise Failed, "#{input.inspect} doesn't match #{constant.inspect}"
       end
     end
   end
 end
 
-Decoder.match("foo").run("foo") # => Ok(foo)
-Decoder.match("foo").run("bar") # => Err('bar' doesn't match 'foo')
+Decoder.match("foo").run("foo") # => foo
+Decoder.match("foo").run("bar") # => Decoder::Failed: "bar" doesn't match "foo"
 ```
 
-Combining `match`, `fmap` and `|` we can now express our mapping from `"status"` to boolean flags:
+Combining `match`, `fmap` and `|` we can now express our mapping from
+`"status"` to boolean flags:
 
 
 ```ruby
 visibility = Decoder.match("visible").fmap { |_| true } |
              Decoder.match("invisible").fmap { |_| false }
 
-visibility.run("visible") # => Ok(true)
-visibility.run("invisible") # => Err(false)
-visibility.run("foo") # => Err('foo' doesn't match 'invisible')
+visibility.run("visible") # => true
+visibility.run("invisible") # => false
+visibility.run("foo") # => Decoder::Failed: "foo" doesn't match "invisible"
 ```
 
 Using `fmap` and ignoring the parameter still feels a bit clunky. We can get
@@ -349,7 +366,9 @@ visibility = (Decoder.match("visible") > true) |
 
 ### Extracting values from hash maps (`{"center" => 23}` -> `23`)
 
-So far we can only decode simple values, but not larger structures like `Hash` or `Array`. We have a couple of ways to decode hash maps. Typically this is done through a DSL similar to the following:
+So far we can only decode simple values, but not larger structures like
+`Hash` or `Array`. We have a couple of choices to implement decoding hash
+maps. Typically this is done through a DSL similar to the following:
 
 ```ruby
 decode_hash(
@@ -362,25 +381,27 @@ However, this is too restrictive for our use case since we're coupling the
 structure of the input hash map to the structure of the output hash map. This
 would leave us with some additional data wrangling which we'd like to avoid.
 So, what's the alternative? Both Haskell's
-[`aeson`](http://hackage.haskell.org/package/aeson-1.4.2.0/docs/Data-Aeson.html#v:.:)
+[aeson](http://hackage.haskell.org/package/aeson-1.4.2.0/docs/Data-Aeson.html#v:.:)
 and Elm's
-[`Json.Decode`](https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Decode#field)
-define functions which (given a key name) extract just a single value from a
+[Json.Decode](https://package.elm-lang.org/packages/elm-lang/core/5.1.1/Json-Decode#field)
+define functions which---given a key name---extract just a single value from a
 hash map. So, we try to do the same:
 
 ```ruby
 class Decoder
   def self.from_key(key, value_decoder)
     self.new do |hash|
-      next Err("'#{hash}' doesn't contain key '#{key}'") unless hash.has_key?(key)
+      raise Failed, "#{hash.inspect} doesn't contain key #{key.inspect}" unless hash.has_key?(key)
 
-      decoder.run(hash.fetch(key))
+      value_decoder.run(hash.fetch(key))
     end
   end
 end
 
-Decoder.from_key("foo", integer).run({"foo" => "2"}) # => Ok(2)
-Decoder.from_key("foo", integer).run({"bar" => "2"}) # => Err()
+foo_decoder = Decoder.from_key("foo", integer)
+
+foo_decoder.run({"foo" => "2"}) # => 2
+foo_decoder.run({"bar" => "2"}) # => Decoder::Failed: {"bar"=>"2"} doesn't contain key "foo"
 ```
 
 A quick note on symbols vs strings as map keys: [^symbol-vs-string]
@@ -406,18 +427,17 @@ decoders?
 class Decoder
   def self.map2(a, b)
     self.new do |input|
-      a.run(input).then do |result1|
-        b.run(input).then do |result2|
-          Ok(yield result1, result2)
-        end
-      end
+      result_1 = a.run(input)
+      result_2 = b.run(input)
+
+      yield result_1, result_2
     end
   end
 end
 
 point = Decoder.map2(x, y) { |x, y| Point.new(x, y) }
 
-point.run({"x" => "3", "y" => "4"}) # => Ok(Point(3, 4))
+point.run({"x" => "3", "y" => "4"}) # => Point(3, 4)
 ```
 
 At this point (ha!) we have all ingredients for decoding a `Circle` and a `Rectangle`:
@@ -455,7 +475,8 @@ TODO
 ### Bonus functions
 
 * `Decoder.at :: Int -> Decoder a -> Decoder a`
-* `Decoder.from_key? :: Key -> Decoder a -> Decoder a`
+* `Decoder.from_key? :: Key -> Decoder a -> Decoder (Maybe a)`
+* `Decoder.lazy :: (() -> Decoder a) -> Decoder a` to decode JSON recursively.
 
 ## Conclusion
 
@@ -552,7 +573,7 @@ converting a `String` to a `Boolean`.
 
 ## Design Goals
 
-* _Composibility_: Coercers should be composable from smaller parts, meaning
+* _Composability_: Coercers should be composable from smaller parts, meaning
   we can reuse a coercer from `String` to `Date` to build a coercer from
   `Array of String` to `Array of Date`.
 * _Flexibility_: It should be easy to express more complex coercions like
@@ -678,8 +699,6 @@ TODO: is `||` left/right associative?
 [^no-to-i]: I choose `Integer` instead of `to_i` since `to_i` returns `0` if it
 can't find a number in the string: `"a".to_i # => 0`
 [^fmap]: fmap historic mistake;
-[^either]: See Rust's [`std::result](https://doc.rust-lang.org/std/result/) for
-an implementation. TODO: Check that we're actually using the same implementation
 [^deadline]: Yes, this is a real-world example from integrating with an external system. Shit's gonna hit the fan in ~981 years.
 [^type-system]: One might argue that a dynamically typed language like Ruby
 has less use for explicit decoders because of duck typing. But I'd argue
@@ -689,7 +708,7 @@ because there's no assistance from a type system in case you mess up.
   [https://wiki.haskell.org/Functor](https://wiki.haskell.org/Functor). They avoided calling it `map` because `map`
   leads to better error message for beginners
   ([source](https://wiki.haskell.org/Typeclassopedia#Instances)).
-[^or-method]: [http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions](http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions)
+[^or-method]: [Built-in operators in Ruby](http://phrogz.net/ProgrammingRuby/language.html#operatorexpressions)
 [^symbol-vs-string]: In case you need to decode a hash map which uses either symbols or strings as keys and you don't know which it is, you simply could define a new decoder which takes care of both:
     ```ruby
     def from_key_indifferent(sym_or_string, decoder)
@@ -700,3 +719,6 @@ because there's no assistance from a type system in case you mess up.
     * [safe_type](https://github.com/chanzuckerberg/safe_type)
     * [dry-types](https://github.com/dry-rb/dry-types) / [dry-validation](https://github.com/dry-rb/dry-validation)
     * [coercible](https://github.com/solnic/coercible)
+    * [rails_param](https://github.com/nicolasblanco/rails_param)
+[^trivial-implementation]: A result type and a decoder have roughly the same
+    API, so many methods will simply delegate to result.
